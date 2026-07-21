@@ -1,0 +1,84 @@
+Sales territory / Territory Manager (TM) reference.
+
+Source: Bal Seal's internal "Sales - Sales Territory" page
+(inside.balseal.com/Sales/SitePages/Sales Territory.aspx), last updated 09/11/2025.
+Supplied by Keaton as a PDF (Territories.pdf) on 2026-07-20. This is the authoritative
+source -- see territory_map.py for the structured version consumed by the pipeline.
+
+An earlier plain-text paste of the same table (before the PDF was supplied) lost its
+row/column alignment during copy/paste and was NOT used for anything -- notably, a
+naive reconstruction of that paste would have put Israel and Austria under Serdar Eren,
+which is wrong; the real table (below) puts both under Davide Amato.
+
+=== US Sales Territory ===
+Columns: Daniel Smoliga (NORTHEAST) | Brian Carter (WEST) | Jeff Frederick (SOUTHERN CALIFORNIA)
+| Mark Copeland (SOUTH) | Wade Kahout (MIDWEST) | Bill Rost (MIDEAST)
+
+Daniel Smoliga (NORTHEAST): Connecticut, Delaware, Massachusetts, Maine, New Hampshire,
+New Jersey, New York, Pennsylvania Zip 17000 & Above, Rhode Island, Vermont,
+NL (Canada), NS (Canada), QC (Canada)
+
+Brian Carter (WEST): Alaska, CA Zip 93600 & Above, Colorado, Hawaii, Idaho, Montana,
+Oregon, Utah, Washington, Wyoming, AB (Canada), BC (Canada), NWT (Canada), SK (Canada),
+Yukon (Canada), Nevada (not Clark County)
+
+Jeff Frederick (SOUTHERN CALIFORNIA): CA Zip 93599 & Below, Arizona, New Mexico,
+Nevada (Clark County)
+
+Mark Copeland (SOUTH): Alabama, Arkansas, Florida, Georgia, Louisiana, Maryland,
+Mississippi, North Carolina, Oklahoma, South Carolina, Tennessee, Texas, Virginia
+
+Wade Kahout (MIDWEST): Iowa, Minnesota, North Dakota, Nebraska, South Dakota, Wisconsin,
+MB (Canada), NU (Canada)
+
+Bill Rost (MIDEAST): Illinois, Indiana, Kansas, Kentucky, Michigan, Missouri, Ohio,
+Pennsylvania Zip 16999 & Below, West Virginia, ON (Canada)
+
+Note: New Brunswick and Prince Edward Island are not listed anywhere in the source table.
+
+=== EMEA Sales Territory ===
+Columns: Davide Amato (SOUTHERN EUROPE) | Marcus James (UK, IRELAND, SCANDINAVIA)
+| Ralph Delcourt (FRANCE, BENELUX, EASTERN EUROPE) | Serdar Eren (GERMANY, SWITZERLAND, TÜRKIYE)
+
+Davide Amato: Italy (+39), Portugal (+351), Spain (+34), Israel (+972), Slovenia,
+Croatia, Bosnia, Montenegro, Albania, Greece, Cyprus, Austria (+43)
+
+Marcus James: England (+44), Ireland (+353), Scotland (+44), Wales (+44),
+Northern Ireland (+44), Denmark (+45), Finland (+358), Norway (+47), Sweden (+46)
+
+Ralph Delcourt: France (+33), Belgium (+32), Bulgaria (+359), Czech Republic (+420),
+Hungary (+36), Luxembourg (+352), Netherlands (+31), Poland (+48), Romania (+40),
+Slovakia (+421), Moldova (+373)
+
+Serdar Eren: Germany (+49), Switzerland (+41), Turkiye (+90), Middle East, Africa
+(broad regional labels in the source table -- see Rest of World below for the
+specific countries this actually covers)
+
+=== Asia Sales Territory ===
+Alan Lam (KOREA): Korea (+82)
+Nozomi Kato (JAPAN): Japan (+81)
+Sam Tam (CHINA, TAIWAN, INDIA, SOUTHEAST ASIA, OCEANIA):
+  China North: Beijing, Changzhou, Dalian, Jiangsu, Kunshan, Lanzhou, Lianyungang,
+    Pudong, Qingdao, Shanghai, Shannxi, Shenyang, Suzhou, Taicang, Tianjin, Wuxi
+  China South: Chengdu, Dongguan, Foshan, Guangzhou, Haian, Hangzhou, Hong Kong,
+    Jinhua, Kowloon, Macau, Nanshan, Shenzen, Tsim Sha Tsui, Xiamen, Xiian, Zhejiang, Zhuhai
+  Taiwan, India, Southeast Asia, Oceania
+
+=== Rest of World (explicit Country -> TM pairs) ===
+Americas: Mexico, Guatemala, Nicaragua, Costa Rica, Cuba, Dominican Republic,
+Puerto Rico, Colombia, Ecuador, Peru, Guyana, Suriname, French Guiana, Brazil,
+Bolivia, Chile, Paraguay, Argentina, Uruguay -> all Lisa Wolf
+Venezuela -> NA (no TM assigned)
+
+EMEA: Sardegna (Island), Cagliari (Island), Morocco, Algeria, Tunisia -> Davide Amato
+Libya, Western Sahara, Mauritania, Mali, Senegal, The Gambia, Guinea Bissau,
+Sierra Leone, Liberia, Cote d'Ivoire, Burkina Faso, Ghana, Togo, Benin, Niger,
+Nigeria, Cameroon, Chad, Egypt, Sudan, Eritrea, Ethiopia, South Sudan,
+Central African Republic, Democratic Republic of the Congo, Uganda, Kenya,
+Somalia, Tanzania, Angola, Zambia, Namibia, Botswana, Zimbabwe, Mozambique,
+South Africa, Madagascar, Saudi Arabia, Yemen, Oman, Qatar -> all Serdar Eren
+Iran, Iraq, Syria, Afghanistan -> NA (no TM assigned)
+
+Asia: Australia, New Zealand, Bangladesh, Cambodia, India, Indonesia, Laos,
+Malaysia, Mongolia, Myanmar, Nepal, Pakistan, Philippines, Singapore, Sri Lanka,
+Taiwan, Thailand, Vietnam -> all Sam Tam

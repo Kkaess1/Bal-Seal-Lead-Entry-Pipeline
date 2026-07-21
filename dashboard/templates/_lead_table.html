@@ -1,0 +1,40 @@
+<table class="kv-table lead-table">
+  <tr><td>Contact</td><td>{{ lead.display_name }}{% if lead.title %} &mdash; {{ lead.title }}{% endif %}</td></tr>
+  <tr><td>Organization</td><td>{{ lead.organization or '—' }}</td></tr>
+  <tr><td>Email</td><td>{{ lead.email or '—' }}</td></tr>
+  <tr><td>Phone</td><td>{{ lead.phone or lead.phone_mobile or '—' }}</td></tr>
+  <tr><td>Location</td><td>{{ lead.location or '—' }}</td></tr>
+  <tr>
+    <td>Territory</td>
+    <td>{% if lead.assigned_tm %}{{ lead.assigned_tm }}{% else %}<span class="text-warn">Unassigned</span>{% endif %}</td>
+  </tr>
+  <tr>
+    <td>Market</td>
+    <td>{% if lead.market %}{{ lead.market }}{% else %}<span class="text-warn">Unassigned</span>{% endif %}</td>
+  </tr>
+  <tr class="row-risk-{{ lead.fraud_risk or 'review' }}">
+    <td>Risk</td>
+    <td><span class="badge badge-{{ lead.fraud_risk or 'review' }}">{{ (lead.fraud_risk or 'review')|upper }}</span></td>
+  </tr>
+  <tr>
+    <td>Flags</td>
+    <td>
+      {% if lead.reasons %}
+        {% for reason in lead.reasons %}<span class="badge badge-reason" title="{{ reason.detail }}">{{ reason.label }}</span>{% endfor %}
+      {% else %}
+        <span class="meta">None noted</span>
+      {% endif %}
+    </td>
+  </tr>
+  <tr>
+    <td>Source</td>
+    <td>
+      {{ lead.source }}
+      {% if lead.duplicate_of_lead_id %} &middot; possible duplicate of <a href="{{ url_for('lead_detail', lead_id=lead.duplicate_of_lead_id) }}">lead #{{ lead.duplicate_of_lead_id }}</a>{% endif %}
+    </td>
+  </tr>
+  <tr>
+    <td>Details</td>
+    <td class="details-cell">{{ lead.details_flat or '—' }}</td>
+  </tr>
+</table>

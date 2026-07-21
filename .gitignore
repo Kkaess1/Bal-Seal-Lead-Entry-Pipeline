@@ -1,0 +1,31 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite database file
+pipeline.db
+*.db
+
+# Environment files
+.env
+.env.*
+
+# Local auth/session state
+auth/
+
+# Cached emails and logs
+email_cache/
+logs/
+
+dashboard.log
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

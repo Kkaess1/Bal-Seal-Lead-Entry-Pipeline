@@ -1,0 +1,6 @@
+# Hard sender-domain blocklist for fraud_screen.py.
+# One domain per line (e.g. "spammy-domain.com"). Lines starting with # are ignored.
+# This is the ONLY domain-based signal allowed to auto-reject a lead without human
+# review -- keep it to domains you're certain about. Everything else (personal
+# email providers, disposable-email providers, etc.) is a soft signal that routes
+# to pending_review instead, not a block.

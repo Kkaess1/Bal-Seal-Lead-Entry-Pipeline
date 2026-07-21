@@ -1,0 +1,50 @@
+{% extends 'base.html' %}
+{% block title %}{{ lead.display_name }}{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('index') }}">&larr; back to pending review</a></p>
+
+  <div class="card risk-{{ lead.fraud_risk or 'review' }}">
+    <div class="card-head">
+      <h2>{{ lead.display_name }}{% if lead.organization %} &mdash; {{ lead.organization }}{% endif %}</h2>
+      <span class="badge badge-{{ lead.fraud_risk or 'review' }}">{{ (lead.fraud_risk or 'review')|upper }}</span>
+    </div>
+
+    {% include '_lead_table.html' %}
+
+    {% if lead.extraction_notes %}
+      <p class="meta" style="margin-top: 0.75rem;">Extraction notes: {{ lead.extraction_notes }}</p>
+    {% endif %}
+    <p class="meta">Extraction confidence: {{ '%.0f'|format((lead.extraction_confidence or 0) * 100) }}%</p>
+
+    <form method="post" action="{{ url_for('approve', lead_id=lead.id) }}">
+      <label for="review_notes">Review notes (optional)</label>
+      <textarea name="review_notes" id="review_notes"></textarea>
+
+      <details style="margin-top: 0.75rem;">
+        <summary style="cursor:pointer; color: var(--accent); font-weight: 600; font-size: 0.88rem;">Edit raw fields before approving</summary>
+        <table style="margin-top: 0.5rem;">
+          {% for field in schema_fields %}
+            <tr>
+              <td style="width:150px"><span class="field-name">{{ field }}</span></td>
+              <td>
+                {% if field in ('lead_details', 'notes_body', 'survey_answers', 'qualifiers') %}
+                  <textarea name="{{ field }}">{{ lead[field] or '' }}</textarea>
+                {% else %}
+                  <input type="text" name="{{ field }}" value="{{ lead[field] or '' }}">
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      </details>
+
+      <div class="actions">
+        <button type="submit" class="btn-approve">Save edits &amp; Approve</button>
+      </div>
+    </form>
+
+    <form method="post" action="{{ url_for('reject', lead_id=lead.id) }}" style="margin-top:0.5rem">
+      <button type="submit" class="btn-reject">Reject</button>
+    </form>
+  </div>
+{% endblock %}

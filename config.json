@@ -1,0 +1,23 @@
+{
+  "oracle": {
+    "base_url": "https://cagc.fa.us1.oraclecloud.com",
+    "lead_source": "Trade Show",
+    "headless": false,
+    "slow_mo_ms": 150,
+    "manual_login": true,
+    "storage_state_path": "auth/oracle_storage_state.json",
+    "session_check_timeout_ms": 10000,
+    "auto_submit": true
+  },
+  "graph": {
+    "client_id": "",
+    "tenant_id": ""
+  },
+  "outlook": {
+    "mailbox_name": "Sales"
+  },
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 5151
+  }
+}

@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block title %}History{% endblock %}
+{% block content %}
+  <h2>History ({{ leads|length }})</h2>
+  {% if not leads %}
+    <p class="empty">Nothing here yet.</p>
+  {% else %}
+    <div class="card" style="padding: 0.5rem 1.3rem;">
+      <table>
+        <tr><th>Status</th><th>Name</th><th>Organization</th><th>Email</th><th>Reviewed</th><th>Notes</th></tr>
+        {% for lead in leads %}
+          <tr>
+            <td><span class="badge badge-{{ 'clear' if lead.status == 'submitted' else 'reject' if lead.status in ('rejected','failed') else 'review' }}">{{ lead.status }}</span></td>
+            <td><a href="{{ url_for('lead_detail', lead_id=lead.id) }}">{{ lead.display_name }}</a></td>
+            <td>{{ lead.organization or '' }}</td>
+            <td>{{ lead.email or '' }}</td>
+            <td>{{ lead.reviewed_at or '' }}</td>
+            <td>{{ lead.submit_error or lead.review_notes or '' }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% endif %}
+{% endblock %}

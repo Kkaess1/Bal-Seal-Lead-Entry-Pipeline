@@ -1,0 +1,16 @@
+{
+  "4750f6070a7eaa5d": {
+    "first_name": 1,
+    "last_name": 2,
+    "organization": 0,
+    "phone": 4,
+    "email": 3,
+    "city": 7,
+    "state": 8,
+    "notes_body": 5,
+    "rank": 6
+  },
+  "0b9dd0cec7965ea6": {
+    "phone_mobile": 20
+  }
+}

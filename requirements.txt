@@ -1,0 +1,15 @@
+# Use --pre flag if standard install fails: py -m pip install --pre playwright
+playwright>=1.49.1
+openpyxl>=3.1.5
+python-dotenv>=1.0.1
+anthropic>=0.40.0
+
+# Lead pipeline: dashboard, secrets, email auth
+flask>=3.0.0
+waitress>=3.0.0
+keyring>=25.0.0
+msal>=1.31.0
+requests>=2.32.0
+
+# Outlook desktop (COM) email ingestion -- no Azure AD / Graph API needed
+pywin32>=308
