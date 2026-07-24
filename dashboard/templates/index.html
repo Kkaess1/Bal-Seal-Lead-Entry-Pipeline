@@ -4,19 +4,31 @@
   <h2>Pending Review ({{ leads|length }})</h2>
 
   {% if not leads %}
-    <p class="empty">No leads waiting for review.</p>
+    <div class="empty-container" style="text-align: center; margin: 4rem auto; max-width: 500px; padding: 2.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;">
+      <h3 style="margin-top: 0; margin-bottom: 1.5rem; font-size: 1.25rem;">No leads waiting for review</h3>
+      <a href="{{ url_for('queue') }}" class="btn-approve" style="display: inline-flex; align-items: center; gap: 0.5rem; text-decoration: none; font-size: 1.05rem; padding: 0.75rem 1.6rem; border-radius: 8px;">
+        Review All Leads &rarr;
+      </a>
+    </div>
   {% endif %}
 
   {% for lead in leads %}
-    <div class="card risk-{{ lead.fraud_risk or 'review' }}">
+    <div class="card" id="lead-card-{{ lead.id }}" data-lead-id="{{ lead.id }}">
       <div class="card-head">
         <h3><a href="{{ url_for('lead_detail', lead_id=lead.id) }}">{{ lead.display_name }}{% if lead.organization %} &mdash; {{ lead.organization }}{% endif %}</a></h3>
-        <span class="badge badge-{{ lead.fraud_risk or 'review' }}">{{ (lead.fraud_risk or 'review')|upper }}</span>
       </div>
       {% include '_lead_table.html' %}
-      <div class="actions">
-        <a class="btn btn-secondary" href="{{ url_for('lead_detail', lead_id=lead.id) }}">Review details</a>
-        <form method="post" action="{{ url_for('approve', lead_id=lead.id) }}" style="display:inline">
+      <div class="actions" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+        <a class="btn btn-secondary" href="{{ url_for('lead_detail', lead_id=lead.id) }}">Review / Edit details</a>
+
+        <details style="margin:0; width:100%; order:10;">
+          <summary class="btn btn-secondary" style="cursor:pointer; font-weight:600; font-size:0.88rem; user-select:none; display:inline-block;">Notes</summary>
+          <div style="margin-top:0.75rem; width:100%; box-sizing:border-box;">
+            <textarea form="approve-form-{{ lead.id }}" name="review_notes" placeholder="Enter notes for this lead..." style="width:100%; min-height:75px; font-family:inherit; font-size:0.88rem; padding:0.6rem; border:1px solid var(--border); border-radius:6px; box-sizing:border-box; background:var(--bg-card); color:var(--text);">{{ lead.review_notes or '' }}</textarea>
+          </div>
+        </details>
+
+        <form id="approve-form-{{ lead.id }}" method="post" action="{{ url_for('approve', lead_id=lead.id) }}" style="display:inline">
           <button type="submit" class="btn-approve">Approve</button>
         </form>
         <form method="post" action="{{ url_for('reject', lead_id=lead.id) }}" style="display:inline">

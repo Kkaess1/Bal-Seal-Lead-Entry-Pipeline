@@ -26,7 +26,7 @@ LEAD_SCHEMA_FIELDS = [
 
 LEAD_STATUSES = (
     'ingested', 'extracted', 'screened', 'pending_review',
-    'approved', 'rejected', 'submitted', 'failed', 'duplicate',
+    'review_approved', 'approved', 'rejected', 'submitted', 'failed', 'duplicate',
 )
 
 
@@ -108,16 +108,8 @@ def init_db(db_path=DB_PATH):
 
 
 def _migrate_leads_columns(conn):
-    """
-    CREATE TABLE IF NOT EXISTS only creates a table if it's missing entirely --
-    it does nothing for a table that already exists with an older schema. This
-    adds any LEAD_SCHEMA_FIELDS column that's missing from an existing
-    database (e.g. `market`, added after real leads already existed in
-    pipeline.db), so real data already in the database is never lost or
-    reset just because the schema grew.
-    """
     existing = {row[1] for row in conn.execute('PRAGMA table_info(leads)')}
-    for field in LEAD_SCHEMA_FIELDS + ['assigned_tm_basis']:
+    for field in LEAD_SCHEMA_FIELDS + ['assigned_tm_basis', 'parent_lead_id']:
         if field not in existing:
             conn.execute(f'ALTER TABLE leads ADD COLUMN {field} TEXT')
     conn.commit()
@@ -362,16 +354,41 @@ def set_fraud_screen_result(lead_id, fraud_risk, fraud_reasons, fraud_score, con
     )
 
 
-def approve_lead(lead_id, reviewed_by=None, review_notes=None, edited_fields=None, conn=None):
-    """Mark a lead approved, optionally applying edits made during review."""
+def approve_lead(lead_id, reviewed_by=None, review_notes=None, edited_fields=None, status='review_approved', conn=None):
+    """Mark a lead approved (defaulting to review_approved stage), optionally applying edits."""
     fields = dict(edited_fields or {})
     fields.update({
-        'status': 'approved',
+        'status': status,
         'reviewed_by': reviewed_by,
         'reviewed_at': _now(),
         'review_notes': review_notes,
     })
     update_lead_fields(lead_id, fields, conn=conn)
+
+
+def finalize_approved_batch(reviewed_by=None, conn=None):
+    """Transition all staged 'review_approved' leads to final 'approved' status ready for Oracle submission."""
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        now = _now()
+        cur = conn.execute(
+            """UPDATE leads SET status = 'approved', updated_at = ?
+               WHERE status = 'review_approved'""",
+            (now,)
+        )
+        count = cur.rowcount
+        if owns_conn:
+            conn.commit()
+        return count
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def unstage_lead(lead_id, conn=None):
+    """Return a staged lead from 'review_approved' back to 'pending_review'."""
+    update_lead_fields(lead_id, {'status': 'pending_review'}, conn=conn)
 
 
 def reject_lead(lead_id, reviewed_by=None, review_notes=None, conn=None):
@@ -380,6 +397,40 @@ def reject_lead(lead_id, reviewed_by=None, review_notes=None, conn=None):
         {'status': 'rejected', 'reviewed_by': reviewed_by, 'reviewed_at': _now(), 'review_notes': review_notes},
         conn=conn,
     )
+
+
+def restore_lead_to_review(lead_id, conn=None):
+    """Restore a rejected (or failed) lead back to 'pending_review' status."""
+    update_lead_fields(lead_id, {'status': 'pending_review'}, conn=conn)
+
+
+def get_lead_email_attachment(lead_id, conn=None):
+    """Retrieve or generate the cached email .txt attachment file for a lead."""
+    lead = get_lead(lead_id, conn=conn)
+    if not lead:
+        return None
+    msg_id = lead.get('message_id')
+    if msg_id:
+        msg = get_message(msg_id, conn=conn)
+        if msg and msg.get('body_cache_path'):
+            cache_path = Path(msg['body_cache_path'])
+            if cache_path.exists():
+                return str(cache_path)
+
+    # Fallback: Generate structured .txt file on the fly from lead details
+    cache_dir = Path('body_cache')
+    cache_dir.mkdir(exist_ok=True)
+    file_path = cache_dir / f"email_lead_{lead_id}.txt"
+    content = (
+        f"From: {lead.get('first_name', '')} {lead.get('last_name', '')} <{lead.get('email', '')}>\n"
+        f"Company: {lead.get('organization', '')}\n"
+        f"Phone: {lead.get('phone', '')}\n"
+        f"Date: {lead.get('created_at', '')}\n"
+        f"{'='*60}\n\n"
+        f"{lead.get('lead_details') or ''}"
+    )
+    file_path.write_text(content, encoding='utf-8')
+    return str(file_path)
 
 
 def mark_lead_submitted(lead_id, oracle_project_name, conn=None):
@@ -396,6 +447,67 @@ def mark_lead_failed(lead_id, submit_error, submit_screenshot_path=None, conn=No
         {'status': 'failed', 'submit_error': submit_error, 'submit_screenshot_path': submit_screenshot_path},
         conn=conn,
     )
+
+
+def get_lead_email_thread(lead_id, conn=None):
+    """
+    Return all messages associated with this lead (original message + any follow-up messages).
+    Returns list of dicts with keys: sender_name, sender_email, subject, received_at, body_text.
+    """
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        lead = get_lead(lead_id, conn=conn)
+        if not lead:
+            return []
+
+        # Follow-up emails from the same sender land as their own lead row
+        # (each email = one lead), not as children of the original via a
+        # parent_lead_id link -- nothing in the ingest pipeline ever sets
+        # that column. dedup_key (same email/name/organization, set on every
+        # insert_lead call) is what actually ties a reply back to the
+        # original inquiry, so use that to pull the whole conversation.
+        rows = conn.execute("""
+            SELECT DISTINCT m.* FROM messages m
+            JOIN leads l ON l.message_id = m.id
+            WHERE l.id = ? OR (l.dedup_key = ? AND l.dedup_key IS NOT NULL)
+            ORDER BY m.received_at ASC, m.id ASC
+        """, (lead_id, lead.get('dedup_key'))).fetchall()
+
+        thread = []
+        for idx, r in enumerate(rows):
+            body = ""
+            if r['body_cache_path'] and Path(r['body_cache_path']).exists():
+                try:
+                    raw_body = Path(r['body_cache_path']).read_text(encoding='utf-8', errors='replace')
+                    import email_cleaner
+                    body = email_cleaner.clean_email_body(raw_body)
+                except Exception:
+                    body = ""
+
+            sender = r['sender_email'] or ''
+            if r['sender_name']:
+                sender = f"{r['sender_name']} <{sender}>"
+
+            recipient = "sales@balseal.com"
+            if r['sender_email'] and 'balseal.com' in r['sender_email'].lower() and lead.get('email'):
+                recipient = lead['email']
+
+            thread.append({
+                'id': r['id'],
+                'is_original': (idx == 0),
+                'index': idx + 1,
+                'sender': sender,
+                'sender_email': r['sender_email'] or '',
+                'recipient': recipient,
+                'subject': r['subject'],
+                'received_at': r['received_at'],
+                'body_text': body,
+            })
+        return thread
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

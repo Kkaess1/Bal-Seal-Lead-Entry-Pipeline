@@ -20,6 +20,7 @@ never rewrites the body itself.
 
 import json
 
+import ai_provider
 import secrets_store
 
 # Exact Oracle "Market" dropdown values (from Keaton's real markets list,
@@ -106,27 +107,8 @@ email body content together, not either alone:
 If you cannot confidently extrapolate which industry a lead belongs to, do not
 omit the field -- default it to INDUSTRIAL instead."""
 
-_RANK_CRITERIA = """How to judge Hot vs. Warm for the "rank" field (never output "Cold" here --
-see the field description above for why):
 
-HOT -- most or all of these are present:
-  - Specific technical detail (dimensions, materials, tolerances, operating conditions,
-    part numbers, drawings, an engineering challenge described in real depth)
-  - From an identifiable, reputable company (a real organization with a legitimate
-    domain/name, not a vague or anonymous inquiry)
-  - Signals real purchase volume or intent (an order quantity, a production run,
-    a recurring/annual volume, an explicit timeline or urgency)
-
-WARM -- more exploratory, still genuine:
-  - Asking questions, curious about capabilities, requesting samples/catalog/pricing
-  - Interested in prospects/possibilities but nothing concrete committed yet
-    (no firm quantity, no firm timeline, no deep technical spec)
-
-Everything that's not a genuine business inquiry at all (spam, bot-generated text,
-clearly irrelevant) is NOT a rank question -- that's an is_lead=false call instead."""
-
-
-def extract_lead(subject, sender_email, sender_name, body):
+def extract_lead(subject, sender_email, sender_name, body, provider=None):
     """
     Returns {'is_lead': bool|None, 'confidence': float, 'fields': {...}, 'notes': str}.
 
@@ -134,12 +116,14 @@ def extract_lead(subject, sender_email, sender_name, body):
     FIELDS_TO_EXTRACT). is_lead=None means extraction couldn't run at all
     (missing API key or a failed call) -- callers should route those to manual
     review rather than treating None as False.
+    
+    `provider` can be 'claude', 'gemini', or None (auto-detected via secrets/env).
     """
-    api_key = secrets_store.get_secret('ANTHROPIC_API_KEY').strip()
-    if not api_key:
+    prov, api_key = ai_provider.get_ai_provider(provider)
+    if not prov or not api_key:
         return {
             'is_lead': None, 'confidence': 0.0, 'fields': {},
-            'notes': 'ANTHROPIC_API_KEY not set -- extraction skipped, needs manual review',
+            'notes': 'No valid AI API key set (ANTHROPIC_API_KEY / GEMINI_API_KEY) -- extraction skipped, needs manual review',
         }
 
     field_list = '\n'.join(f'  {f}: {FIELD_DESCRIPTIONS[f]}' for f in FIELDS_TO_EXTRACT)
@@ -172,32 +156,23 @@ Fields to extract (field_name: description):
 
 {_MARKET_CRITERIA}
 
-First decide: is this email a genuine sales inquiry/lead (someone asking about a
-product, requesting a quote, describing a technical need), as opposed to spam, a
-newsletter, an internal email, a vendor pitching TO us, or something unrelated?
+First decide:
+1. Is this email a genuine sales inquiry/lead (someone asking about a product, requesting a quote, describing a technical need), as opposed to spam, a newsletter, an internal email, a vendor pitching TO us, or something unrelated?
+2. Is this email a follow-up or reply on an existing thread (e.g. status update, reply to an earlier email, ongoing conversation between customer and rep) rather than a brand-new initial inquiry?
 
 Return ONLY a JSON object with this exact shape, no explanation outside the JSON:
 {{
   "is_lead": true or false,
+  "is_followup": true or false,
+  "followup_reason": "short explanation if is_followup is true, else null",
   "confidence": 0.0 to 1.0,
   "fields": {{ ...only fields you are confident about, omit the rest... }},
   "notes": "one short sentence on your reasoning, especially if is_lead is false or confidence is low"
 }}"""
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model='claude-haiku-4-5',
-            max_tokens=1024,
-            messages=[{'role': 'user', 'content': prompt}],
-        )
-        raw = message.content[0].text.strip()
-        if '```' in raw:
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        parsed = json.loads(raw)
+        raw = ai_provider.call_llm(prompt, provider=prov, max_tokens=4096)
+        parsed = ai_provider.parse_json_response(raw)
 
         raw_fields = parsed.get('fields') or {}
         validated_fields = {
@@ -208,31 +183,24 @@ Return ONLY a JSON object with this exact shape, no explanation outside the JSON
         # Safety nets beyond the prompt instructions -- never trust free-form
         # model output for two fields with hard constraints:
         if 'rank' in validated_fields:
-            # Normalize casing first -- confirmed live the model sometimes
-            # returns "WARM" instead of "Warm", which wouldn't match
-            # oracle_automation.py's exact `rank in ('Hot', 'Warm')` check and
-            # would silently get dropped there instead of being recognized.
-            rank_value = validated_fields['rank'].strip().capitalize()
-            if rank_value == 'Cold':
-                # Instructed not to happen; if it does anyway, drop it rather
-                # than pass "Cold" through to Oracle -- see FIELD_DESCRIPTIONS['rank'].
-                validated_fields.pop('rank')
-            elif rank_value in ('Hot', 'Warm'):
+            rank_value = validated_fields['rank'].strip().title()
+            if rank_value in ('Hot', 'Warm'):
                 validated_fields['rank'] = rank_value
             else:
-                validated_fields.pop('rank')  # not a recognized value at all
+                validated_fields.pop('rank')
+
         if 'market' in validated_fields:
             market_value = validated_fields['market'].strip().upper()
             match = next((m for m in MARKET_OPTIONS if m == market_value), None)
             if match:
                 validated_fields['market'] = match
             else:
-                # Not an exact match to a real Oracle dropdown value -- drop it
-                # rather than let a near-miss silently fail to select anything.
                 validated_fields.pop('market')
 
         return {
             'is_lead': bool(parsed.get('is_lead')),
+            'is_followup': bool(parsed.get('is_followup')),
+            'followup_reason': str(parsed.get('followup_reason') or ''),
             'confidence': float(parsed.get('confidence') or 0.0),
             'fields': validated_fields,
             'notes': str(parsed.get('notes') or ''),

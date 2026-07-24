@@ -3,6 +3,10 @@ import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+from dotenv import load_dotenv
+load_dotenv()
+
+import secrets_store
 from phone_parser import parse_phone
 
 logger = logging.getLogger(__name__)
@@ -20,8 +24,8 @@ class OracleLeadAutomator:
         self.headless    = config.get('headless', False)
         self.slow_mo     = config.get('slow_mo_ms', 150)
         self.manual_login = config.get('manual_login', True)
-        self.username    = username
-        self.password    = password
+        self.username    = username or secrets_store.get_secret('ORACLE_USERNAME')
+        self.password    = password or secrets_store.get_secret('ORACLE_PASSWORD')
         self.log_dir     = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
 
@@ -258,23 +262,17 @@ class OracleLeadAutomator:
         logger.info(f'Filling: {project_name}')
 
         # Open the form
-        self.page.locator('button:has-text("Create Lead")').click()
-        # "Save and Close" only exists inside the Create Lead form — reliable signal.
-        # Oracle ADF's dialog can be genuinely slow to render on the real tenant --
-        # confirmed live: a production run timed out here at 30s even though the
-        # exact same form opened fine within a few seconds on a manual retry
-        # immediately after. Use LONG, and retry the click once in case the first
-        # one landed on a stale/not-yet-interactive button rather than a truly
-        # slow render.
+        create_btn_sel = 'button:has-text("Create Lead"), a:has-text("Create Lead"), [title*="Create Lead"], [aria-label*="Create Lead"]'
+        self.page.locator(create_btn_sel).first.click(force=True)
         try:
             self.page.wait_for_selector(
                 'button:has-text("Save and Close")',
                 state='visible',
-                timeout=LONG,
+                timeout=MEDIUM,
             )
         except PWTimeout:
             logger.warning('  "Save and Close" did not appear after the first click -- retrying')
-            self.page.locator('button:has-text("Create Lead")').click()
+            self.page.locator(create_btn_sel).first.click(force=True)
             self.page.wait_for_selector(
                 'button:has-text("Save and Close")',
                 state='visible',
@@ -325,11 +323,9 @@ class OracleLeadAutomator:
         elif rank == 'Cold':
             logger.warning(f'  Rank was "Cold" for {project_name} -- leaving Rank blank')
 
-        # Market dropdown -- from lead_extractor.py's classification (validated
-        # there against the exact Oracle option list; only ever a real match).
-        market = lead.get('market')
-        if market:
-            self._select_dropdown('Market', market)
+        # Market dropdown -- mandatory field in Oracle. Default to INDUSTRIAL if unassigned.
+        market = (lead.get('market') or 'INDUSTRIAL').strip().upper()
+        self._select_dropdown('Market', market)
 
         # Owner (Territory Manager) -- only overridden when territory_map.assign_tm()
         # produced a confident match; otherwise Oracle's default owner (whoever is
@@ -358,8 +354,56 @@ class OracleLeadAutomator:
         self._fill_by_label('City',           lead.get('city'))
         # State skipped — Oracle dropdown does not accept abbreviations like TX
 
+        # --- Email Attachment ---
+        email_file = lead.get('email_file') or lead.get('raw_email_path')
+        if not email_file and lead.get('id'):
+            import db
+            email_file = db.get_lead_email_attachment(lead['id'])
+        if email_file:
+            self._attach_file(email_file)
+
         # Form is filled — user will review and save manually
         return project_name
+
+    def _attach_file(self, file_path):
+        """
+        Attaches a file to the lead in Oracle Sales Cloud.
+        Clicks Oracle's "Add Attachment" / "Attach File" button and uploads the email file.
+        """
+        if not file_path or not Path(file_path).exists():
+            return False
+        path_obj = Path(file_path).resolve()
+        logger.info(f'  Attempting to attach email file: {path_obj}')
+
+        # Selectors for Oracle ADF & Redwood attachment widgets
+        file_input_sel = 'input[type="file"], [id*="attachment"] input, [id*="Attach"] input'
+        attach_btn_sel = (
+            'button:has-text("Add Attachment"), a:has-text("Add Attachment"), '
+            'button:has-text("Attach File"), a:has-text("Attach File"), '
+            'button:has-text("Attachment"), [aria-label*="Attachment"], [title*="Attachment"]'
+        )
+
+        try:
+            # 1. Try file chooser by clicking the Attach button
+            attach_btn = self.page.locator(attach_btn_sel).first
+            if attach_btn.is_visible(timeout=4_000):
+                logger.info('  Found Oracle Attachment button -- clicking to attach file.')
+                with self.page.expect_file_chooser(timeout=6_000) as fc_info:
+                    attach_btn.click()
+                file_chooser = fc_info.value
+                file_chooser.set_files(str(path_obj))
+                logger.info('  ✓ Successfully attached email file via file chooser.')
+                return True
+
+            # 2. Try direct file input element
+            file_input = self.page.locator(file_input_sel).first
+            if file_input.is_visible(timeout=3_000):
+                file_input.set_input_files(str(path_obj))
+                logger.info('  ✓ Successfully attached email file via file input element.')
+                return True
+        except Exception as e:
+            logger.warning(f'  Attachment attempt skipped or non-blocking: {e}')
+        return False
 
     def submit_lead(self, lead, trade_show_name, source_label='Tradeshow'):
         """
@@ -377,8 +421,16 @@ class OracleLeadAutomator:
         """
         project_name = self.create_lead(lead, trade_show_name, source_label=source_label)
 
-        self.page.locator('button:has-text("Save and Close")').click()
-        self.page.wait_for_timeout(1500)  # let Oracle's ADF validation run before checking
+        # Dismiss any lingering dropdown popup / glass pane if present
+        try:
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+        save_btn = self.page.locator('button:has-text("Save and Close")').first
+        save_btn.click(force=True)
+        self.page.wait_for_timeout(2000)  # let Oracle's ADF validation run before checking
 
         error_text = self._get_popup_error()
         if error_text:
@@ -517,37 +569,45 @@ class OracleLeadAutomator:
     def _select_dropdown(self, label_text, value):
         """
         Select a value from an Oracle ADF dropdown (selectOneChoice).
-        Strategy: click the field → wait for listbox → click the matching option.
         """
         if not value or not str(value).strip():
             return
         value = str(value).strip()
 
         try:
-            # Click the dropdown trigger
+            # 1. Click trigger
             trigger = self.page.get_by_label(label_text, exact=False).first
-            trigger.wait_for(state='visible', timeout=SHORT)
+            trigger.wait_for(state='visible', timeout=5000)
             trigger.click()
-            self.page.wait_for_timeout(600)
+            self.page.wait_for_timeout(500)
 
-            # Oracle ADF renders options in a popup listbox
+            # 2. Click option
             option = self.page.locator(
                 f'[role="option"]:has-text("{value}"), '
                 f'li.af_selectItem:has-text("{value}"), '
                 f'li:has-text("{value}")'
             ).first
-            option.wait_for(state='visible', timeout=SHORT)
+            option.wait_for(state='visible', timeout=5000)
             option.click()
             self.page.wait_for_timeout(300)
-        except Exception as e:
-            # Fallback: try native <select> element
+            return
+        except Exception:
+            # Always close lingering popup if selection failed
             try:
-                sel = self.page.locator('select').filter(
-                    has=self.page.locator(f'option:has-text("{value}")')
-                ).first
-                sel.select_option(label=value)
+                self.page.keyboard.press("Escape")
+                self.page.wait_for_timeout(300)
             except Exception:
-                logger.warning(f"  Could not select '{value}' in '{label_text}': {e}")
+                pass
+
+        # Fallback: Try typing value into input directly
+        try:
+            field = self.page.get_by_label(label_text, exact=False).first
+            field.click()
+            field.fill(value)
+            self.page.keyboard.press("Tab")
+            self.page.wait_for_timeout(300)
+        except Exception as e:
+            logger.warning(f"  Could not select '{value}' in '{label_text}': {e}")
 
     def _search_and_select_existing(self, label_text, search_text):
         """

@@ -55,91 +55,82 @@ def setup_logging():
     return log_file
 
 
-def _cache_body(message_id, body_text):
+def _cache_body(message_id, body_text, msg_dict=None):
     EMAIL_CACHE_DIR.mkdir(exist_ok=True)
     path = EMAIL_CACHE_DIR / f'{message_id}.txt'
-    path.write_text(body_text or '', encoding='utf-8')
+    if msg_dict:
+        header = (
+            f"From: {msg_dict.get('sender_name', '')} <{msg_dict.get('sender_email', '')}>\n"
+            f"Date: {msg_dict.get('received_at', '')}\n"
+            f"Subject: {msg_dict.get('subject', '')}\n"
+            f"{'='*60}\n\n"
+        )
+        content = header + (body_text or '')
+    else:
+        content = body_text or ''
+    path.write_text(content, encoding='utf-8')
     return str(path)
 
 
-def _screen_and_stage(lead_id, lead, sender_email):
+def _screen_and_stage(lead_id, lead, sender_email, subject=None, is_followup=False, followup_reason=None):
     """Territory assignment + fraud screening for a lead that's already been
-    inserted. Shared by both the Excel-attachment path and the AI-extraction
-    path so they're screened identically."""
+    inserted. All leads are staged in pending_review so the human user can review them."""
     tm, basis = territory_map.assign_tm(lead)
     db.set_territory_assignment(lead_id, tm, basis)
 
-    result = fraud_screen.screen_lead(lead, sender_email=sender_email)
-    if result['auto_reject']:
-        db.set_fraud_screen_result(lead_id, 'reject', result['fraud_reasons'], result['fraud_score'])
-        db.update_lead_fields(lead_id, {
-            'status': 'rejected',
-            'review_notes': 'Auto-rejected by rule engine (unambiguous junk) -- see fraud_reasons.',
-        })
-        logger.info(f'  Lead {lead_id}: auto-rejected')
-        # This is a decided state too, same as a human rejecting via the
-        # dashboard -- mark the source email reviewed if everything else
-        # pulled from it (e.g. other rows in the same Excel attachment) is
-        # also decided.
-        review_marking.maybe_mark_email_reviewed(lead_id)
-    else:
-        db.set_fraud_screen_result(lead_id, result['fraud_risk'], result['fraud_reasons'], result['fraud_score'])
-        logger.info(f'  Lead {lead_id}: staged for review (risk={result["fraud_risk"]})')
+    result = fraud_screen.screen_lead(
+        lead, sender_email=sender_email, subject=subject,
+        is_followup=is_followup, followup_reason=followup_reason
+    )
+    risk_level = 'reject' if result['auto_reject'] else result['fraud_risk']
+    db.set_fraud_screen_result(lead_id, risk_level, result['fraud_reasons'], result['fraud_score'])
+    db.update_lead_fields(lead_id, {'status': 'pending_review'})
+    logger.info(f'  Lead {lead_id}: staged for review (risk={risk_level})')
 
 
-def _process_excel_attachment(message_row_id, path, sender_email):
+def _process_excel_attachment(message_row_id, path, sender_email, subject=None):
     """Existing excel_parser.py path -- one lead per spreadsheet row, same as
     main.py's manual flow already produces."""
     rows = excel_parser.parse_excel(path)
     for row in rows:
         lead_id = db.insert_lead(row, source='email_excel_attachment',
                                   message_id=message_row_id, source_row_number=row.get('row_number'))
-        _screen_and_stage(lead_id, row, sender_email)
+        _screen_and_stage(lead_id, row, sender_email, subject=subject)
     return len(rows)
 
 
 def _process_body_text(message_row_id, msg):
-    """AI-extraction path for messages without an Excel attachment (or where
-    the attachment wasn't an Excel file)."""
+    """AI-extraction path for messages without an Excel attachment.
+    Always inserts a lead record so every email is visible on the dashboard for human review."""
     extraction = lead_extractor.extract_lead(
         subject=msg['subject'], sender_email=msg['sender_email'],
         sender_name=msg['sender_name'], body=msg['body_text'],
     )
 
-    if extraction['is_lead'] is None:
-        # Extraction itself couldn't run (no API key / call failed) -- still
-        # worth a human look, never silently dropped.
-        lead = {'email': msg['sender_email'], 'lead_details': email_cleaner.clean_email_body(msg['body_text'])}
-        lead_id = db.insert_lead(lead, source='email_ai_extract', message_id=message_row_id)
-        db.set_extraction_result(lead_id, 0.0, extraction['notes'])
-        _screen_and_stage(lead_id, lead, msg['sender_email'])
-        return
+    lead = dict(extraction.get('fields') or {})
+    if not lead.get('email'):
+        lead['email'] = msg['sender_email']
 
-    if not extraction['is_lead']:
-        logger.info(f"  Message {msg['id']}: not a lead ({extraction['notes']})")
-        return
-
-    lead = dict(extraction['fields'])
-    # Cleaned of clutter (security banners, tracking/SafeLinks URLs, embedded-image
-    # references, disclaimers, quoted reply history, automated-system footers --
-    # see email_cleaner.py), but NOT summarized or paraphrased -- the customer's
-    # actual words (including their signature) are untouched. This is what lands
-    # in Oracle's "Lead Details" field, and what a rep sees is what actually gets
-    # submitted -- the dashboard already showed this same cleaned version during
-    # review, so the two need to match, not just look similar.
     lead['lead_details'] = email_cleaner.clean_email_body(msg['body_text'])
     lead_id = db.insert_lead(lead, source='email_ai_extract', message_id=message_row_id)
-    db.set_extraction_result(lead_id, extraction['confidence'], extraction['notes'])
-    _screen_and_stage(lead_id, lead, msg['sender_email'])
+    db.set_extraction_result(
+        lead_id,
+        extraction.get('confidence', 0.0) if extraction.get('is_lead') else 0.1,
+        extraction.get('notes', 'Flagged by AI extraction for human review')
+    )
+    _screen_and_stage(
+        lead_id, lead, msg['sender_email'],
+        subject=msg.get('subject'),
+        is_followup=extraction.get('is_followup', False),
+        followup_reason=extraction.get('followup_reason'),
+    )
 
 
-def process_message(msg):
+def process_message(msg, force=False):
     """Handles one ingestion-backend message dict (see
     outlook_ingest.fetch_new_messages -- same shape email_ingest.py's Graph
-    path also produces). Idempotent: re-running against an already-processed
-    message is a no-op, via the hard unique constraint on
-    messages.source_message_id."""
-    body_cache_path = _cache_body(msg['id'], msg['body_text'])
+    path also produces). Idempotent unless force=True."""
+    body_cache_path = _cache_body(msg['id'], msg['body_text'], msg_dict=msg)
     message_row_id = db.insert_message(
         source_message_id=msg['id'], received_at=msg['received_at'],
         sender_email=msg['sender_email'], sender_name=msg['sender_name'],
@@ -147,7 +138,14 @@ def process_message(msg):
         body_cache_path=body_cache_path,
     )
     if message_row_id is None:
-        return  # already processed in a prior run (or a dedup race)
+        if force:
+            existing = db.get_message_by_source_id(msg['id'])
+            if existing:
+                message_row_id = existing['id']
+            else:
+                return
+        else:
+            return  # already processed in a prior run (or a dedup race)
 
     try:
         handled_as_excel = False
@@ -178,6 +176,10 @@ def main():
              'the last-checked watermark. For bounded test/backfill runs -- does not '
              'affect what a normal run picks up next.',
     )
+    parser.add_argument(
+        '--force', action='store_true',
+        help='Force re-extraction and processing even if the message was previously ingested.',
+    )
     args = parser.parse_args()
 
     log_file = setup_logging()
@@ -187,7 +189,7 @@ def main():
 
     try:
         if args.recent:
-            logger.info(f'Fetching the {args.recent} most recent message(s) (bounded run)...')
+            logger.info(f'Fetching the {args.recent} most recent message(s) (bounded run, force={args.force})...')
             messages = outlook_ingest.fetch_recent_messages(args.recent)
         else:
             logger.info('Fetching new mail...')
@@ -198,7 +200,7 @@ def main():
 
     logger.info(f'{len(messages)} message(s).')
     for msg in messages:
-        process_message(msg)
+        process_message(msg, force=args.force)
 
     if not args.recent:
         # A bounded --recent run doesn't touch last_ingest_run_at -- it isn't

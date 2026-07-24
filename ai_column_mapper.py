@@ -8,12 +8,13 @@ import hashlib
 import json
 from pathlib import Path
 
+import ai_provider
 import secrets_store
 
 # Cached results live next to this file
 CACHE_FILE = Path(__file__).parent / '.column_cache.json'
 
-# The fields Claude should map to (mirrors COLUMN_ALIASES keys in excel_parser.py)
+# The fields AI should map to (mirrors COLUMN_ALIASES keys in excel_parser.py)
 KNOWN_FIELDS = [
     'first_name',
     'last_name',
@@ -81,22 +82,23 @@ def _save_cache(cache: dict):
         pass
 
 
-def map_columns_with_ai(headers: list[str], already_mapped: set[str]) -> dict[str, int]:
+def map_columns_with_ai(headers: list[str], already_mapped: set[str], provider: str = None) -> dict[str, int]:
     """
-    Ask Claude to map unrecognized column headers to known field names.
+    Ask AI model (Claude or Gemini) to map unrecognized column headers to known field names.
 
     Parameters
     ----------
     headers       : full list of column headers from the Excel sheet (zero-based index implied)
     already_mapped: set of field names that alias-matching already resolved
+    provider      : 'claude', 'gemini', or None (auto-detected)
 
     Returns
     -------
-    dict mapping field_name → zero-based column index for any NEW mappings Claude found.
+    dict mapping field_name → zero-based column index for any NEW mappings found.
     Returns {} if the API key is not set or AI is unavailable.
     """
-    api_key = secrets_store.get_secret('ANTHROPIC_API_KEY').strip()
-    if not api_key:
+    prov, api_key = ai_provider.get_ai_provider(provider)
+    if not prov or not api_key:
         return {}
 
     # Which fields still need mapping?
@@ -134,22 +136,8 @@ Example response format:
 {{"first_name": 2, "last_name": 3, "organization": 0}}"""
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model='claude-haiku-4-5',
-            max_tokens=512,
-            messages=[{'role': 'user', 'content': prompt}],
-        )
-        raw = message.content[0].text.strip()
-
-        # Extract JSON — Claude sometimes wraps it in ```json ... ```
-        if '```' in raw:
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-
-        mapping = json.loads(raw)
+        raw = ai_provider.call_llm(prompt, provider=prov, max_tokens=512)
+        mapping = ai_provider.parse_json_response(raw)
         # Validate: keys must be known fields, values must be valid column indices
         validated = {}
         for field, idx in mapping.items():

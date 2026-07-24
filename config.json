@@ -4,7 +4,7 @@
     "lead_source": "Trade Show",
     "headless": false,
     "slow_mo_ms": 150,
-    "manual_login": true,
+    "manual_login": false,
     "storage_state_path": "auth/oracle_storage_state.json",
     "session_check_timeout_ms": 10000,
     "auto_submit": true

@@ -95,11 +95,8 @@ def _load_oracle_config():
     # Excel-import flow still legitimately uses config.json's lead_source
     # value for real trade-show batches.
     oracle_config['lead_source'] = 'Website'
-    # Headless for the scheduled/unattended run specifically -- forced here,
-    # NOT in config.json, since oracle_login_capture.py shares that same
-    # oracle.headless value and needs a *visible* browser (a human has to
-    # actually see it to log in). Overriding only here keeps that working.
-    oracle_config['headless'] = True
+    # Respect config.json's headless setting (defaults to False if not set)
+    oracle_config['headless'] = config.get('oracle', {}).get('headless', False)
     # This run never waits on a human -- ensure_logged_in() drives
     # _auto_login() directly when needed, bypassing the manual_login branch
     # in login()/navigate_to_leads() entirely. Set for clarity/consistency

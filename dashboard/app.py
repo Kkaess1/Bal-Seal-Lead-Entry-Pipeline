@@ -63,7 +63,19 @@ def _decorate(lead):
     if lead.get('lead_details'):
         cleaned = email_cleaner.clean_email_body(lead['lead_details'])
         lead['details_flat'] = email_cleaner.condense_paragraphs(cleaned) if cleaned else None
+    lead['email_thread'] = db.get_lead_email_thread(lead['id'])
+    lead['has_followup'] = len(lead['email_thread']) > 1
     return lead
+
+
+@app.context_processor
+def inject_counts():
+    try:
+        staged = len(db.list_leads(status='review_approved'))
+        pending = len(db.list_leads(status='pending_review'))
+        return dict(staged_count=staged, pending_count=pending)
+    except Exception:
+        return dict(staged_count=0, pending_count=0)
 
 
 @app.route('/')
@@ -72,6 +84,29 @@ def index():
     leads = [_decorate(l) for l in leads]
     leads.sort(key=lambda l: RISK_ORDER.get(l.get('fraud_risk'), 1))
     return render_template('index.html', leads=leads)
+
+
+@app.route('/queue')
+def queue():
+    leads = db.list_leads(status='review_approved')
+    leads = [_decorate(l) for l in leads]
+    leads.sort(key=lambda l: l.get('created_at') or '', reverse=True)
+    return render_template('queue.html', leads=leads)
+
+
+@app.route('/queue/approve_all', methods=['POST'])
+def queue_approve_all():
+    staged_leads = db.list_leads(status='review_approved')
+    db.finalize_approved_batch(reviewed_by='dashboard')
+    for lead in staged_leads:
+        review_marking.maybe_mark_email_reviewed(lead['id'])
+    return redirect(url_for('history'))
+
+
+@app.route('/queue/<int:lead_id>/unstage', methods=['POST'])
+def queue_unstage(lead_id):
+    db.unstage_lead(lead_id)
+    return redirect(url_for('queue'))
 
 
 @app.route('/leads/<int:lead_id>')
@@ -87,19 +122,35 @@ def lead_detail(lead_id):
                             schema_fields=db.LEAD_SCHEMA_FIELDS)
 
 
+@app.route('/leads/<int:lead_id>/save', methods=['POST'])
+def save_lead(lead_id):
+    edited = {}
+    for field in db.LEAD_SCHEMA_FIELDS:
+        if field in request.form:
+            edited[field] = request.form.get(field) or None
+    if 'review_notes' in request.form:
+        edited['review_notes'] = request.form.get('review_notes') or None
+    db.update_lead_fields(lead_id, edited)
+    lead = db.get_lead(lead_id)
+    if lead and lead.get('status') == 'review_approved':
+        return redirect(url_for('queue'))
+    return redirect(url_for('index'))
+
+
 @app.route('/leads/<int:lead_id>/approve', methods=['POST'])
 def approve(lead_id):
     edited = {}
     for field in db.LEAD_SCHEMA_FIELDS:
         if field in request.form:
             edited[field] = request.form.get(field) or None
+    # Stages lead under 'review_approved' so user can review in /queue before final batch submission
     db.approve_lead(
         lead_id,
         reviewed_by=request.form.get('reviewed_by') or 'dashboard',
         review_notes=request.form.get('review_notes') or None,
         edited_fields=edited,
+        status='review_approved',
     )
-    review_marking.maybe_mark_email_reviewed(lead_id)
     return redirect(url_for('index'))
 
 
@@ -112,6 +163,12 @@ def reject(lead_id):
     )
     review_marking.maybe_mark_email_reviewed(lead_id)
     return redirect(url_for('index'))
+
+
+@app.route('/leads/<int:lead_id>/restore', methods=['POST'])
+def restore(lead_id):
+    db.restore_lead_to_review(lead_id)
+    return redirect(url_for('history'))
 
 
 @app.route('/history')
@@ -140,3 +197,4 @@ if __name__ == '__main__':
         port=dash_config.get('port', 5151),
         debug=True,
     )
+

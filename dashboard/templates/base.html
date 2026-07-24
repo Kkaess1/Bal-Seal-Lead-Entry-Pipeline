@@ -205,7 +205,8 @@
       <img src="{{ url_for('static', filename='logo.svg') }}" alt="Bal Seal Engineering">
     </a>
     <nav>
-      <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">Pending Review</a>
+      <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">Pending Review{% if pending_count %} ({{ pending_count }}){% endif %}</a>
+      <a href="{{ url_for('queue') }}" class="{{ 'active' if request.endpoint == 'queue' }}">Input Queue{% if staged_count %} <span style="background:var(--accent); color:#fff; border-radius:10px; padding:2px 7px; font-size:0.75rem; margin-left:2px;">{{ staged_count }}</span>{% endif %}</a>
       <a href="{{ url_for('history') }}" class="{{ 'active' if request.endpoint == 'history' }}">History</a>
       <a href="{{ url_for('status') }}" class="{{ 'active' if request.endpoint == 'status' }}">Status</a>
     </nav>
@@ -213,5 +214,93 @@
   <main>
     {% block content %}{% endblock %}
   </main>
+  <script>
+    function scrollToLead(element) {
+      if (!element) return;
+      var header = document.querySelector('header');
+      var headerHeight = header ? header.offsetHeight + 20 : 80;
+      var elementTop = element.getBoundingClientRect().top + window.scrollY;
+      window.scrollTo({
+        top: Math.max(0, elementTop - headerHeight),
+        behavior: 'smooth'
+      });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      if (sessionStorage.getItem('scroll_to_next_lead')) {
+        sessionStorage.removeItem('scroll_to_next_lead');
+        var firstCard = document.querySelector('.card');
+        if (firstCard) {
+          setTimeout(function() { scrollToLead(firstCard); }, 100);
+        }
+      }
+    });
+
+    // Intercept card Approve/Reject forms for smooth in-place removal and scrolling to next lead
+    document.addEventListener('submit', function(e) {
+      var form = e.target;
+      if (form.action && (form.action.includes('/approve') || form.action.includes('/reject'))) {
+        var card = form.closest('.card');
+        if (card && !document.querySelector('textarea[name="review_notes"]')) {
+          e.preventDefault();
+
+          // Identify the next target card before removing current card
+          var nextCard = card.nextElementSibling;
+          if (!nextCard || !nextCard.classList.contains('card')) {
+            nextCard = card.previousElementSibling;
+            if (nextCard && !nextCard.classList.contains('card')) {
+              nextCard = null;
+            }
+          }
+
+          var btns = card.querySelectorAll('button, a.btn');
+          btns.forEach(function(b) { b.disabled = true; b.style.opacity = '0.5'; });
+
+          fetch(form.action, {
+            method: form.method || 'POST',
+            body: new FormData(form),
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+          }).then(function(res) {
+            if (res.ok) {
+              card.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+              card.style.opacity = '0';
+              card.style.transform = 'scale(0.98)';
+              setTimeout(function() {
+                card.remove();
+
+                // Smoothly scroll to the top of the NEXT lead card
+                if (nextCard) {
+                  scrollToLead(nextCard);
+                }
+
+                var heading = document.querySelector('h2');
+                var remainingCards = document.querySelectorAll('.card');
+                if (heading && heading.textContent.includes('Pending Review')) {
+                  heading.textContent = 'Pending Review (' + remainingCards.length + ')';
+                }
+                if (remainingCards.length === 0) {
+                  var main = document.querySelector('main');
+                  if (main && !document.querySelector('.empty-container')) {
+                    var emptyDiv = document.createElement('div');
+                    emptyDiv.className = 'empty-container';
+                    emptyDiv.style.cssText = 'text-align: center; margin: 4rem auto; max-width: 500px; padding: 2.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;';
+                    emptyDiv.innerHTML = '<h3 style="margin-top: 0; margin-bottom: 1.5rem; font-size: 1.25rem;">No leads waiting for review</h3>' +
+                      '<a href="/queue" class="btn-approve" style="display: inline-flex; align-items: center; gap: 0.5rem; text-decoration: none; font-size: 1.05rem; padding: 0.75rem 1.6rem; border-radius: 8px;">Review All Leads &rarr;</a>';
+                    main.appendChild(emptyDiv);
+                  }
+                }
+              }, 200);
+            } else {
+              form.submit();
+            }
+          }).catch(function() {
+            form.submit();
+          });
+        }
+      }
+    });
+  </script>
 </body>
 </html>
+
+

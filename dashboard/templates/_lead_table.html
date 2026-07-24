@@ -12,10 +12,6 @@
     <td>Market</td>
     <td>{% if lead.market %}{{ lead.market }}{% else %}<span class="text-warn">Unassigned</span>{% endif %}</td>
   </tr>
-  <tr class="row-risk-{{ lead.fraud_risk or 'review' }}">
-    <td>Risk</td>
-    <td><span class="badge badge-{{ lead.fraud_risk or 'review' }}">{{ (lead.fraud_risk or 'review')|upper }}</span></td>
-  </tr>
   <tr>
     <td>Flags</td>
     <td>
@@ -38,3 +34,41 @@
     <td class="details-cell">{{ lead.details_flat or '—' }}</td>
   </tr>
 </table>
+
+{% if lead.email_thread and lead.email_thread|length > 1 %}
+<div class="followup-thread-section" style="margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 0.75rem;">
+  <div class="followup-banner" style="background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe; padding: 0.5rem 0.75rem; border-radius: 6px; font-weight: 600; font-size: 0.88rem; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+    <span>📩 Follow-Up Email Received for <strong>{{ lead.display_name }}</strong>{% if lead.organization %} ({{ lead.organization }}){% endif %}</span>
+    <span style="font-size: 0.78rem; font-weight: 600; background: #c7d2fe; color: #1e1b4b; padding: 2px 8px; border-radius: 12px;">{{ lead.email_thread|length }} Messages</span>
+  </div>
+  
+  <details class="thread-dropdown" style="background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;">
+    <summary style="padding: 0.6rem 0.8rem; font-weight: 600; font-size: 0.88rem; cursor: pointer; user-select: none; background: var(--surface); color: var(--text);">
+      ▼ View Conversation Thread (Original & Follow-up Emails)
+    </summary>
+    <div class="thread-body-container" style="padding: 0.75rem; display: flex; flex-direction: column; gap: 0.75rem;">
+      {% for msg in lead.email_thread %}
+        {% if msg.is_original %}
+          <div class="thread-message original-msg" style="border: 1px solid #cbd5e1; border-radius: 6px; padding: 0.75rem; background: var(--surface);">
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.4rem;">Original Inquiry (Email #1)</div>
+            <div class="thread-msg-header" style="border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; margin-bottom: 0.5rem; font-size: 0.85rem; color: var(--text);">
+              <div><strong>From:</strong> {{ msg.sender }}</div>
+              <div><strong>To:</strong> {{ msg.recipient }}</div>
+            </div>
+            <div class="thread-msg-body" style="white-space: pre-wrap; font-family: inherit; font-size: 0.88rem; color: var(--text); line-height: 1.4;">{{ msg.body_text or '(no body text)' }}</div>
+          </div>
+        {% else %}
+          <div class="thread-message followup-msg" style="border: 1px solid #c7d2fe; border-radius: 6px; padding: 0.75rem; background: var(--surface-2);">
+            <div style="font-size: 0.75rem; font-weight: 700; color: #4338ca; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.4rem;">Follow-Up Email #{{ loop.index - 1 }}</div>
+            <div class="thread-msg-header" style="border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; margin-bottom: 0.5rem; font-size: 0.85rem; color: var(--text);">
+              <div><strong>From:</strong> {{ msg.sender }}</div>
+              <div><strong>To:</strong> {{ msg.recipient }}</div>
+            </div>
+            <div class="thread-msg-body" style="white-space: pre-wrap; font-family: inherit; font-size: 0.88rem; color: var(--text); line-height: 1.4;">{{ msg.body_text or '(no body text)' }}</div>
+          </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </details>
+</div>
+{% endif %}

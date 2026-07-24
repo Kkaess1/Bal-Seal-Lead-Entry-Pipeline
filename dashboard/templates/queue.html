@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+{% block title %}Input Queue{% endblock %}
+{% block content %}
+  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; margin-bottom:1.5rem;">
+    <div>
+      <h2 style="margin:0;">Input Queue — Session Review ({{ leads|length }})</h2>
+    </div>
+    {% if leads %}
+      <form method="post" action="{{ url_for('queue_approve_all') }}" style="margin:0;">
+        <button type="submit" class="btn-approve" style="font-size:1rem; padding:0.6rem 1.4rem;">Approve All &amp; Send to Queue</button>
+      </form>
+    {% endif %}
+  </div>
+
+
+
+  {% for lead in leads %}
+    <div class="card" id="queue-card-{{ lead.id }}" data-lead-id="{{ lead.id }}" style="margin-bottom:1rem;">
+      <div class="card-head">
+        <div>
+          <h3 style="margin:0; font-size:1.15rem;">
+            <strong>{{ lead.organization or '(No Company Specified)' }}</strong>
+            {% if lead.display_name and lead.display_name != lead.organization %}
+              &mdash; <span style="color:var(--text); font-weight:normal;">{{ lead.display_name }}</span>
+            {% endif %}
+          </h3>
+          <div class="meta" style="margin-top:0.25rem;">
+            {% if lead.title %}<span style="font-weight:600; color:var(--text);">{{ lead.title }}</span> &bull; {% endif %}
+            {% if lead.email %}<span>{{ lead.email }}</span> &bull; {% endif %}
+            {% if lead.phone %}<span>{{ lead.phone }}</span> &bull; {% endif %}
+            {% if lead.location %}<span>{{ lead.location }}</span>{% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:0.5rem; display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:0.5rem;">
+        <details style="margin:0; flex:1; min-width:240px;">
+          <summary style="cursor:pointer; color:var(--accent); font-weight:600; font-size:0.88rem; user-select:none; line-height:2.2rem;">Expand Lead Details &amp; Fields</summary>
+          <div style="margin-top:0.75rem; padding-top:0.5rem; border-top:1px dashed var(--border);">
+            {% include '_lead_table.html' %}
+            <div style="margin-top:0.75rem; padding-top:0.5rem; border-top:1px solid var(--border); display:flex; justify-content:flex-end;">
+              <form method="post" action="{{ url_for('queue_unstage', lead_id=lead.id) }}" style="display:inline; margin:0;">
+                <button type="submit" class="btn-secondary" style="color:var(--text);">Unstage (Return to Review)</button>
+              </form>
+            </div>
+          </div>
+        </details>
+
+        <div class="actions" style="display:flex; gap:0.5rem; align-items:center; margin-top:0.15rem;">
+          <form method="post" action="{{ url_for('reject', lead_id=lead.id) }}" style="display:inline; margin:0;">
+            <button type="submit" class="btn-reject">Reject</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+
+{% endblock %}

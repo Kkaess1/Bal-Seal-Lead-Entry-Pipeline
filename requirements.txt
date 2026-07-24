@@ -2,7 +2,7 @@
 playwright>=1.49.1
 openpyxl>=3.1.5
 python-dotenv>=1.0.1
-anthropic>=0.40.0
+google-genai>=0.1.0
 
 # Lead pipeline: dashboard, secrets, email auth
 flask>=3.0.0

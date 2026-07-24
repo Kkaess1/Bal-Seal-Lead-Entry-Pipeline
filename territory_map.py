@@ -186,12 +186,10 @@ def _normalize_us_state(state):
 
 def assign_tm(lead):
     """
-    Return (tm_name, basis) for a lead based on its company address.
-
-    tm_name is None when there's no confident match -- callers should leave
-    Oracle's Owner field at its default and flag the lead for manual assignment
-    rather than guessing. `basis` always explains why, for the dashboard.
+    Return (tm_name, basis) for a lead.
+    Currently overridden per user request to set Owner to Keaton Kaess for all leads.
     """
+    return "Keaton Kaess", "Lead owner assigned to Keaton Kaess"
     country = (lead.get('country') or '').strip().lower()
     state_raw = (lead.get('state') or '').strip()
     zip5 = _zip5(lead.get('zip'))

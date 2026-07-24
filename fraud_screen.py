@@ -23,6 +23,7 @@ import json
 import os
 import re
 
+import ai_provider
 import secrets_store
 
 # --- Rule-based reference data -----------------------------------------------
@@ -88,7 +89,12 @@ def _real_word_ratio(text):
 
 # --- Rule-based pass -----------------------------------------------------------
 
-def rule_based_screen(lead, sender_email=None):
+_RE_FW_SUBJ_RE = re.compile(r'^\s*(?:re|fw|fwd)\s*:\s*', re.IGNORECASE)
+_QUOTE_THREAD_RE = re.compile(r'(?:From:\s*.+\n(?:\s*(?:Sent|Date|To|Cc|Bcc):\s*.+\n){1,4}\s*Subject:|On .{0,120}wrote:\s*\n|-{3,}\s*Original Message\s*-{3,})', re.IGNORECASE)
+_BALSEAL_DOMAINS = {'balseal.com', 'bse-web.com'}
+
+
+def rule_based_screen(lead, sender_email=None, subject=None):
     """
     Returns (auto_reject: bool, reasons: list[dict]). Never talks to an LLM.
     `sender_email` defaults to lead['email'] if not given separately.
@@ -96,6 +102,22 @@ def rule_based_screen(lead, sender_email=None):
     reasons = []
     email = sender_email or lead.get('email')
     domain = _email_domain(email)
+
+    # --- internal employee reply ---
+    if domain and domain in _BALSEAL_DOMAINS:
+        reasons.append({
+            'tag': 'internal_balseal_reply',
+            'label': 'Bal Seal Internal Reply',
+            'detail': f'Message sent by internal Bal Seal employee address ({email}).'
+        })
+
+    # --- subject-based follow-up ---
+    if subject and _RE_FW_SUBJ_RE.search(subject):
+        reasons.append({
+            'tag': 'followup_email',
+            'label': 'Follow-Up Email',
+            'detail': f'Subject line indicates a thread reply or forward ("{subject.strip()}").'
+        })
 
     email_valid = bool(email and EMAIL_RE.match(email.strip()))
     has_phone = bool((lead.get('phone') or '').strip())
@@ -134,6 +156,13 @@ def rule_based_screen(lead, sender_email=None):
 
     body_text = lead.get('lead_details') or ''
     if body_text:
+        if _QUOTE_THREAD_RE.search(body_text) and not any(r['tag'] == 'followup_email' for r in reasons):
+            reasons.append({
+                'tag': 'followup_email',
+                'label': 'Follow-Up Email',
+                'detail': 'Message body contains quoted conversation history / thread headers.'
+            })
+
         ratio = _real_word_ratio(body_text)
         if ratio < 0.5 and len(body_text.split()) >= 4:
             reasons.append({'tag': 'gibberish_content', 'label': 'Low real-word ratio',
@@ -146,7 +175,7 @@ def rule_based_screen(lead, sender_email=None):
                              'detail': f'Contains phrases commonly seen in spam: {", ".join(hit_phrases)}.'})
 
     org = (lead.get('organization') or '').strip().lower()
-    if org and domain and domain not in PERSONAL_EMAIL_DOMAINS and domain not in DISPOSABLE_EMAIL_DOMAINS:
+    if org and domain and domain not in PERSONAL_EMAIL_DOMAINS and domain not in DISPOSABLE_EMAIL_DOMAINS and domain not in _BALSEAL_DOMAINS:
         org_tokens = {tok for tok in re.findall(r'[a-z]+', org) if len(tok) > 2}
         domain_root = domain.split('.')[0]
         if org_tokens and not any(tok in domain_root or domain_root in tok for tok in org_tokens):
@@ -168,18 +197,20 @@ _LLM_REASON_LABELS = {
 }
 
 
-def llm_plausibility_screen(lead, body_excerpt):
+def llm_plausibility_screen(lead, body_excerpt, provider=None):
     """
     Returns {'fraud_risk': 'clear'|'review'|'reject', 'reasons': [...]}.
     Advisory only -- see module docstring. Returns fraud_risk='review' with an
     explanatory reason if the API key is missing or the call fails, since an
     unscreened lead should default to caution, not silently pass as clear.
+    
+    `provider` can be 'claude', 'gemini', or None (auto-detected).
     """
-    api_key = secrets_store.get_secret('ANTHROPIC_API_KEY').strip()
-    if not api_key:
+    prov, api_key = ai_provider.get_ai_provider(provider)
+    if not prov or not api_key:
         return {'fraud_risk': 'review', 'reasons': [
             {'tag': 'llm_screen_unavailable', 'label': 'AI plausibility check unavailable',
-             'detail': 'ANTHROPIC_API_KEY not set -- this lead has only been rule-screened.'}]}
+             'detail': 'No AI API key set (ANTHROPIC_API_KEY / GEMINI_API_KEY) -- this lead has only been rule-screened.'}]}
 
     excerpt = (body_excerpt or '')[:2000]
 
@@ -213,19 +244,8 @@ Return ONLY a JSON object with this exact shape, no explanation outside the JSON
 Omit any signal tag that doesn't apply -- an empty reasons list is a valid answer for a clean message."""
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model='claude-haiku-4-5',
-            max_tokens=512,
-            messages=[{'role': 'user', 'content': prompt}],
-        )
-        raw = message.content[0].text.strip()
-        if '```' in raw:
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        parsed = json.loads(raw)
+        raw = ai_provider.call_llm(prompt, provider=prov, max_tokens=2048)
+        parsed = ai_provider.parse_json_response(raw)
 
         risk = parsed.get('fraud_risk')
         if risk not in _LLM_ALLOWED_RISK:
@@ -256,7 +276,7 @@ Omit any signal tag that doesn't apply -- an empty reasons list is a valid answe
 _RISK_RANK = {'clear': 0, 'review': 1, 'reject': 2}
 
 
-def screen_lead(lead, sender_email=None):
+def screen_lead(lead, sender_email=None, subject=None, is_followup=False, followup_reason=None):
     """
     Runs both passes and combines them. Returns:
       {'auto_reject': bool, 'fraud_risk': str, 'fraud_reasons': [...], 'fraud_score': None}
@@ -264,9 +284,16 @@ def screen_lead(lead, sender_email=None):
     fraud_score is left None deliberately -- the reasons list is the actual
     signal; a single opaque number would hide more than it explains.
     """
-    auto_reject, rule_reasons = rule_based_screen(lead, sender_email=sender_email)
+    auto_reject, rule_reasons = rule_based_screen(lead, sender_email=sender_email, subject=subject)
     if auto_reject:
         return {'auto_reject': True, 'fraud_risk': 'reject', 'fraud_reasons': rule_reasons, 'fraud_score': None}
+
+    if is_followup and not any(r['tag'] == 'followup_email' for r in rule_reasons):
+        rule_reasons.append({
+            'tag': 'followup_email',
+            'label': 'Follow-Up Email',
+            'detail': followup_reason or 'AI classified this message as a follow-up or reply thread.'
+        })
 
     llm_result = llm_plausibility_screen(lead, lead.get('lead_details'))
 

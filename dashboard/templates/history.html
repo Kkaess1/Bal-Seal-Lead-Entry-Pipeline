@@ -5,19 +5,46 @@
   {% if not leads %}
     <p class="empty">Nothing here yet.</p>
   {% else %}
-    <div class="card" style="padding: 0.5rem 1.3rem;">
-      <table>
-        <tr><th>Status</th><th>Name</th><th>Organization</th><th>Email</th><th>Reviewed</th><th>Notes</th></tr>
-        {% for lead in leads %}
-          <tr>
-            <td><span class="badge badge-{{ 'clear' if lead.status == 'submitted' else 'reject' if lead.status in ('rejected','failed') else 'review' }}">{{ lead.status }}</span></td>
-            <td><a href="{{ url_for('lead_detail', lead_id=lead.id) }}">{{ lead.display_name }}</a></td>
-            <td>{{ lead.organization or '' }}</td>
-            <td>{{ lead.email or '' }}</td>
-            <td>{{ lead.reviewed_at or '' }}</td>
-            <td>{{ lead.submit_error or lead.review_notes or '' }}</td>
+    <div class="card" style="padding: 1.25rem; overflow-x: auto;">
+      <table style="width: 100%; border-collapse: collapse; font-size: 0.92rem;">
+        <thead>
+          <tr style="border-bottom: 2px solid var(--border); text-align: left;">
+            <th style="padding: 0.6rem; width: 110px;">Status</th>
+            <th style="padding: 0.6rem; min-width: 140px;">Name</th>
+            <th style="padding: 0.6rem; min-width: 140px;">Organization</th>
+            <th style="padding: 0.6rem; min-width: 180px;">Email</th>
+            <th style="padding: 0.6rem; width: 140px; white-space: nowrap;">Reviewed</th>
+            <th style="padding: 0.6rem; min-width: 160px;">Notes</th>
+            <th style="padding: 0.6rem; width: 130px; text-align: right;">Action</th>
           </tr>
-        {% endfor %}
+        </thead>
+        <tbody>
+          {% for lead in leads %}
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding: 0.65rem 0.6rem; vertical-align: top;">
+                <span class="badge badge-{{ 'clear' if lead.status in ('submitted', 'approved') else 'reject' if lead.status in ('rejected','failed') else 'review' }}">{{ lead.status|upper }}</span>
+              </td>
+              <td style="padding: 0.65rem 0.6rem; vertical-align: top;">
+                <a href="{{ url_for('lead_detail', lead_id=lead.id) }}" style="font-weight: 600;">{{ lead.display_name }}</a>
+              </td>
+              <td style="padding: 0.65rem 0.6rem; vertical-align: top;">{{ lead.organization or '—' }}</td>
+              <td style="padding: 0.65rem 0.6rem; vertical-align: top; word-break: break-all;">{{ lead.email or '—' }}</td>
+              <td style="padding: 0.65rem 0.6rem; vertical-align: top; white-space: nowrap; font-size: 0.85rem;">
+                {{ (lead.reviewed_at or '')[:16]|replace('T', ' ') or '—' }}
+              </td>
+              <td style="padding: 0.65rem 0.6rem; vertical-align: top;">
+                {{ lead.review_notes or lead.submit_error or '—' }}
+              </td>
+              <td style="padding: 0.65rem 0.6rem; vertical-align: top; text-align: right;">
+                {% if lead.status in ('rejected', 'failed') %}
+                  <form method="post" action="{{ url_for('restore', lead_id=lead.id) }}" style="display:inline; margin:0;">
+                    <button type="submit" class="btn-secondary" style="font-size: 0.78rem; padding: 0.3rem 0.6rem; white-space: nowrap;">Return to Review</button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
       </table>
     </div>
   {% endif %}
