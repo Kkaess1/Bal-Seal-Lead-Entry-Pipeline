@@ -67,7 +67,11 @@ def _build_column_map(headers):
                 break
 
     # Special case: unnamed column at index 8 that contains Hot/Warm/Cold
-    if 'rank' not in col_map and UNNAMED_RANK_COL_INDEX < len(headers):
+    if (
+        'rank' not in col_map
+        and UNNAMED_RANK_COL_INDEX < len(headers)
+        and not normalized[UNNAMED_RANK_COL_INDEX]
+    ):
         col_map['rank'] = UNNAMED_RANK_COL_INDEX
 
     # AI fallback: map any fields that alias-matching didn't cover
@@ -113,8 +117,12 @@ def parse_excel(file_path):
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f'Excel file not found: {file_path}')
+    if path.suffix.lower() == '.xls':
+        raise ValueError(
+            'Legacy .xls workbooks are not supported. Save the workbook as .xlsx first.'
+        )
 
-    wb = openpyxl.load_workbook(path, data_only=True)
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
 
     # If multiple sheets, let the caller choose; default to first
     ws = wb.active
@@ -168,6 +176,7 @@ def parse_excel(file_path):
         }
         leads.append(lead)
 
+    wb.close()
     return leads
 
 

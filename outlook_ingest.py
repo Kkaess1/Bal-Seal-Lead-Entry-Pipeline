@@ -40,6 +40,7 @@ import db
 
 ATTACHMENT_DIR = Path(__file__).parent / 'email_attachments'
 _LAST_CHECKED_KEY = 'outlook_last_checked_at'
+_PENDING_CHECKED_KEY = 'outlook_pending_checked_at'
 _OUTLOOK_DATE_FMT = '%m/%d/%Y %I:%M %p'   # format Outlook's Restrict() filter expects
 _OL_MAIL_ITEM_CLASS = 43                  # olMail -- skip meeting requests, receipts, etc.
 
@@ -161,8 +162,19 @@ def fetch_new_messages():
         except pywintypes.com_error:
             continue  # a single unreadable item shouldn't fail the whole run
 
-    db.set_run_state(_LAST_CHECKED_KEY, run_started_at.isoformat())
+    # This is deliberately only a pending watermark. The orchestrator commits
+    # it after every fetched message has been durably processed. If the process
+    # crashes, the prior watermark remains in place and the messages are seen
+    # again; message/lead idempotency makes that safe.
+    db.set_run_state(_PENDING_CHECKED_KEY, run_started_at.isoformat())
     return messages
+
+
+def commit_fetch_watermark():
+    pending = db.get_run_state(_PENDING_CHECKED_KEY)
+    if pending:
+        db.set_run_state(_LAST_CHECKED_KEY, pending)
+        db.set_run_state(_PENDING_CHECKED_KEY, '')
 
 
 def fetch_recent_messages(count):
@@ -217,7 +229,7 @@ def download_excel_attachments(message_id):
     for i in range(1, item.Attachments.Count + 1):
         att = item.Attachments.Item(i)
         name = att.FileName or ''
-        if not name.lower().endswith(('.xlsx', '.xls')):
+        if not name.lower().endswith('.xlsx'):
             continue
         safe_name = re.sub(r'[^\w.\-]', '_', name)
         path = ATTACHMENT_DIR / f'{short_id}_{safe_name}'

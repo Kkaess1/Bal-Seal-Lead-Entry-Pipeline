@@ -47,6 +47,7 @@ from dotenv import load_dotenv
 
 import db
 import secrets_store
+from oracle_api import OracleApiError, OracleLeadApiClient
 from oracle_automation import OracleLeadAutomator
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,7 @@ def _load_oracle_config():
     # in login()/navigate_to_leads() entirely. Set for clarity/consistency
     # even though ensure_logged_in() doesn't itself branch on this flag.
     oracle_config['manual_login'] = False
+    oracle_config.setdefault('submission_method', 'api')
     return oracle_config
 
 
@@ -119,6 +121,8 @@ def _run_fill_only(bot, leads):
 
     results = {'ok': 0, 'fail': 0}
     for lead in leads:
+        if not db.claim_lead_for_submission(lead['id']):
+            continue
         source_label, trade_show_name = _project_label(lead)
         label = f"{lead.get('organization') or '?'} - {lead.get('first_name') or ''} {lead.get('last_name') or ''}"
         print(f'\n[{label}]')
@@ -148,6 +152,11 @@ def _run_auto_submit(bot, leads):
     config.oracle.auto_submit is true."""
     results = {'ok': 0, 'fail': 0}
     for lead in leads:
+        if not db.claim_lead_for_submission(lead['id']):
+            logger.info(
+                f'  Skipped lead {lead["id"]}; it was claimed or changed by another run.'
+            )
+            continue
         source_label, trade_show_name = _project_label(lead)
         label = f"{lead.get('organization') or '?'} - {lead.get('first_name') or ''} {lead.get('last_name') or ''}"
         try:
@@ -159,13 +168,95 @@ def _run_auto_submit(bot, leads):
                 logger.info(f'  Submitted: {label} ({project_name})')
                 results['ok'] += 1
             else:
-                screenshot_name = f'submit_fail_{lead["id"]}.png'
-                db.mark_lead_failed(lead['id'], error_detail, submit_screenshot_path=f'logs/{screenshot_name}')
+                if (error_detail or '').startswith('SUBMISSION_OUTCOME_UNKNOWN:'):
+                    db.mark_submission_unknown(
+                        lead['id'], error_detail, oracle_project_name=project_name
+                    )
+                else:
+                    db.mark_lead_failed(lead['id'], error_detail)
                 logger.error(f'  Failed: {label} -- {error_detail}')
                 results['fail'] += 1
         except Exception as e:
-            db.mark_lead_failed(lead['id'], str(e))
-            logger.error(f'  Exception submitting {label}: {e}')
+            detail = str(e)
+            fatal_browser_error = any(
+                marker in detail.lower()
+                for marker in (
+                    'target page', 'browser has been closed', 'context has been closed',
+                )
+            )
+            if bot._save_clicked:
+                db.mark_submission_unknown(
+                    lead['id'],
+                    f'Submission interrupted after Save was attempted: {detail}. '
+                    'Check Oracle before retrying.',
+                    oracle_project_name=(
+                        f"{(lead.get('organization') or '').upper().strip()} - "
+                        f"{(lead.get('first_name') or '').strip()} "
+                        f"{(lead.get('last_name') or '').strip()} - "
+                        f"{source_label} - {trade_show_name}"
+                    ).strip(),
+                )
+            else:
+                db.schedule_lead_retry(lead['id'], detail)
+            logger.exception(f'  Exception submitting {label}: {e}')
+            results['fail'] += 1
+            if fatal_browser_error:
+                logger.error(
+                    'Browser session is no longer usable; aborting the remaining batch.'
+                )
+                break
+    return results
+
+
+def _run_api_submit(client, leads):
+    """Full unattended submission through Oracle's REST API."""
+    results = {'ok': 0, 'fail': 0}
+    for lead in leads:
+        if not db.claim_lead_for_submission(lead['id']):
+            logger.info(
+                f'  Skipped lead {lead["id"]}; it was claimed or changed by another run.'
+            )
+            continue
+
+        source_label, trade_show_name = _project_label(lead)
+        label = f"{lead.get('organization') or '?'} - {lead.get('first_name') or ''} {lead.get('last_name') or ''}"
+        try:
+            result = client.submit_lead(
+                lead, trade_show_name, source_label=source_label
+            )
+            db.mark_lead_submitted(
+                lead['id'],
+                result['project_name'],
+                oracle_record_id=result.get('oracle_record_id'),
+                field_warnings=result.get('field_warnings'),
+            )
+            if result.get('oracle_lead_number'):
+                logger.info(
+                    f'  Submitted via API: {label} '
+                    f'({result["oracle_lead_number"]}, {result["project_name"]})'
+                )
+            else:
+                logger.info(f'  Submitted via API: {label} ({result["project_name"]})')
+            for warning in result.get('field_warnings') or []:
+                logger.warning(f'  Field warning for lead {lead["id"]}: {warning}')
+            results['ok'] += 1
+        except OracleApiError as e:
+            detail = str(e)
+            # None status_code = network/transport error (request never reached Oracle)
+            # -- treat the same as 5xx: schedule a retry.
+            # Only 4xx errors (where Oracle explicitly rejected the payload) are
+            # considered permanent failures that the human needs to fix.
+            is_client_error = e.status_code is not None and e.status_code < 500
+            if is_client_error:
+                db.mark_lead_failed(lead['id'], detail)
+            else:
+                db.schedule_lead_retry(lead['id'], detail)
+            logger.error(f'  API failed: {label} -- {detail}')
+            results['fail'] += 1
+        except Exception as e:
+            detail = f'Unexpected API submission error: {e}'
+            db.schedule_lead_retry(lead['id'], detail)
+            logger.exception(f'  Exception submitting {label}: {e}')
             results['fail'] += 1
     return results
 
@@ -175,19 +266,52 @@ def main():
     logger.info(f'Log file: {log_file}')
     load_dotenv(Path(__file__).parent / '.env', override=False)
     db.init_db()
+    recovered = db.release_stale_submission_claims()
+    if recovered:
+        logger.warning(
+            f'{recovered} stale submission claim(s) moved to submission_unknown '
+            'for manual Oracle reconciliation.'
+        )
 
     oracle_config = _load_oracle_config()
     auto_submit = oracle_config.get('auto_submit', False)
+    submission_method = (
+        oracle_config.get('submission_method')
+        or ('playwright' if not auto_submit else 'api')
+    ).strip().lower()
 
-    leads = db.list_leads(status='approved')
+    leads = db.list_ready_for_submission()
     if not leads:
         logger.info('No approved leads waiting for submission.')
         return
 
-    logger.info(f'{len(leads)} approved lead(s) to submit. auto_submit={auto_submit}')
+    logger.info(
+        f'{len(leads)} approved lead(s) to submit. '
+        f'auto_submit={auto_submit}, submission_method={submission_method}'
+    )
 
     username = secrets_store.get_secret('ORACLE_USERNAME')
     password = secrets_store.get_secret('ORACLE_PASSWORD')
+    if not username or not password:
+        logger.error(
+            'Missing ORACLE_USERNAME/ORACLE_PASSWORD in Windows Credential Manager or .env.'
+        )
+        sys.exit(1)
+
+    if submission_method == 'api':
+        client = OracleLeadApiClient(oracle_config, username=username, password=password)
+        results = _run_api_submit(client, leads)
+        db.set_run_state('oracle_session_status', 'api')
+        db.set_run_state('last_submit_run_at', datetime.now(timezone.utc).isoformat())
+        logger.info(f"Submit run complete. {results['ok']} ok, {results['fail']} failed.")
+        return
+
+    if submission_method != 'playwright':
+        logger.error(
+            f'Unsupported oracle.submission_method "{submission_method}". '
+            'Use "api" or "playwright".'
+        )
+        sys.exit(1)
 
     with OracleLeadAutomator(oracle_config, username=username, password=password) as bot:
         if not bot.ensure_logged_in():

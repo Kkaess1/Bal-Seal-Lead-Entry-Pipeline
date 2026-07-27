@@ -44,9 +44,16 @@ MARKET_OPTIONS = [
 
 FIELDS_TO_EXTRACT = [
     'first_name', 'last_name', 'organization', 'title', 'phone', 'phone_mobile',
-    'email', 'address1', 'address2', 'city', 'state', 'zip', 'country', 'rank',
-    'market',
+    'email', 'website', 'address1', 'address2', 'city', 'state', 'zip', 'country',
+    'rank', 'market',
 ]
+
+_PLAUSIBILITY_LABELS = {
+    'poor_spelling': 'Poor spelling/grammar',
+    'no_engineering_specs': 'No engineering specs',
+    'gibberish_content': 'Gibberish/bot-generated content',
+    'other_concern': 'Other plausibility concern',
+}
 
 FIELD_DESCRIPTIONS = {
     'first_name': 'Contact first/given name',
@@ -56,6 +63,7 @@ FIELD_DESCRIPTIONS = {
     'phone': 'Primary or work phone number, exactly as written',
     'phone_mobile': 'Mobile/cell phone number, exactly as written, if separately given',
     'email': "The contact's own email address (usually the sender's address)",
+    'website': 'Company website URL, if explicitly provided',
     'address1': 'Street address line 1',
     'address2': 'Street address line 2 (suite, unit, etc.)',
     'city': 'City',
@@ -167,6 +175,13 @@ Return ONLY a JSON object with this exact shape, no explanation outside the JSON
   "followup_reason": "short explanation if is_followup is true, else null",
   "confidence": 0.0 to 1.0,
   "fields": {{ ...only fields you are confident about, omit the rest... }},
+  "plausibility": {{
+    "fraud_risk": "clear" or "review" or "reject",
+    "reasons": [
+      {{"tag": "poor_spelling" or "no_engineering_specs" or "gibberish_content" or "other_concern",
+        "detail": "one short sentence"}}
+    ]
+  }},
   "notes": "one short sentence on your reasoning, especially if is_lead is false or confidence is low"
 }}"""
 
@@ -197,12 +212,34 @@ Return ONLY a JSON object with this exact shape, no explanation outside the JSON
             else:
                 validated_fields.pop('market')
 
+        raw_plausibility = parsed.get('plausibility') or {}
+        plausibility_risk = raw_plausibility.get('fraud_risk')
+        if plausibility_risk not in ('clear', 'review', 'reject'):
+            plausibility_risk = 'review'
+        plausibility_reasons = []
+        for item in raw_plausibility.get('reasons') or []:
+            if not isinstance(item, dict) or item.get('tag') not in _PLAUSIBILITY_LABELS:
+                continue
+            tag = item['tag']
+            plausibility_reasons.append({
+                'tag': tag,
+                'label': _PLAUSIBILITY_LABELS[tag],
+                'detail': str(item.get('detail') or '')[:300],
+            })
+
+        is_lead = parsed.get('is_lead')
+        is_followup = parsed.get('is_followup')
+        confidence = max(0.0, min(1.0, float(parsed.get('confidence') or 0.0)))
         return {
-            'is_lead': bool(parsed.get('is_lead')),
-            'is_followup': bool(parsed.get('is_followup')),
+            'is_lead': is_lead if isinstance(is_lead, bool) else None,
+            'is_followup': is_followup if isinstance(is_followup, bool) else False,
             'followup_reason': str(parsed.get('followup_reason') or ''),
-            'confidence': float(parsed.get('confidence') or 0.0),
+            'confidence': confidence,
             'fields': validated_fields,
+            'plausibility': {
+                'fraud_risk': plausibility_risk,
+                'reasons': plausibility_reasons,
+            },
             'notes': str(parsed.get('notes') or ''),
         }
     except Exception as e:

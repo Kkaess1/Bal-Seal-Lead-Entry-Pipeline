@@ -62,7 +62,10 @@ FIELD_DESCRIPTIONS = {
 
 def _fingerprint(headers: list[str]) -> str:
     """Stable hash of a sorted header list — used as cache key."""
-    normalized = sorted(h.strip().lower() for h in headers if h)
+    normalized = [
+        str(header).strip().lower() if header is not None else ''
+        for header in headers
+    ]
     return hashlib.sha256(json.dumps(normalized).encode()).hexdigest()[:16]
 
 

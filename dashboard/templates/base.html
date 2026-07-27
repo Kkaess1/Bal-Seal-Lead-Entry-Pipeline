@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="csrf-token" content="{{ csrf_token }}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Lead Review{% endblock %} - Lead Pipeline</title>
   <style>
@@ -109,7 +110,7 @@
     header a.active { color: #28495a; border-bottom-color: var(--orange); }
     header a:hover { color: #28495a; }
 
-    main { max-width: 860px; margin: 0 auto; padding: 1.75rem 1.25rem 4rem; }
+    main { max-width: 1100px; margin: 0 auto; padding: 1.75rem 1.5rem 4rem; }
     main a { color: var(--accent); }
     main a:hover { color: var(--accent-hover); }
 
@@ -206,7 +207,7 @@
     </a>
     <nav>
       <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">Pending Review{% if pending_count %} ({{ pending_count }}){% endif %}</a>
-      <a href="{{ url_for('queue') }}" class="{{ 'active' if request.endpoint == 'queue' }}">Input Queue{% if staged_count %} <span style="background:var(--accent); color:#fff; border-radius:10px; padding:2px 7px; font-size:0.75rem; margin-left:2px;">{{ staged_count }}</span>{% endif %}</a>
+      <a href="{{ url_for('queue') }}" class="{{ 'active' if request.endpoint == 'queue' }}">Input Queue{% if staged_count or ready_count %} <span style="background:var(--accent); color:#fff; border-radius:10px; padding:2px 7px; font-size:0.75rem; margin-left:2px;">{{ staged_count + ready_count }}</span>{% endif %}</a>
       <a href="{{ url_for('history') }}" class="{{ 'active' if request.endpoint == 'history' }}">History</a>
       <a href="{{ url_for('status') }}" class="{{ 'active' if request.endpoint == 'status' }}">Status</a>
     </nav>
@@ -227,6 +228,16 @@
     }
 
     document.addEventListener('DOMContentLoaded', function() {
+      var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+      document.querySelectorAll('form[method="post"], form[method="POST"]').forEach(function(form) {
+        if (!form.querySelector('input[name="_csrf_token"]')) {
+          var input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = '_csrf_token';
+          input.value = csrfToken;
+          form.appendChild(input);
+        }
+      });
       if (sessionStorage.getItem('scroll_to_next_lead')) {
         sessionStorage.removeItem('scroll_to_next_lead');
         var firstCard = document.querySelector('.card');
@@ -259,7 +270,10 @@
           fetch(form.action, {
             method: form.method || 'POST',
             body: new FormData(form),
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            headers: {
+              'X-Requested-With': 'XMLHttpRequest',
+              'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content
+            }
           }).then(function(res) {
             if (res.ok) {
               card.style.transition = 'opacity 0.2s ease, transform 0.2s ease';

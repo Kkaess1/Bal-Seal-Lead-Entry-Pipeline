@@ -276,7 +276,8 @@ Omit any signal tag that doesn't apply -- an empty reasons list is a valid answe
 _RISK_RANK = {'clear': 0, 'review': 1, 'reject': 2}
 
 
-def screen_lead(lead, sender_email=None, subject=None, is_followup=False, followup_reason=None):
+def screen_lead(lead, sender_email=None, subject=None, is_followup=False,
+                followup_reason=None, precomputed_llm_result=None):
     """
     Runs both passes and combines them. Returns:
       {'auto_reject': bool, 'fraud_risk': str, 'fraud_reasons': [...], 'fraud_score': None}
@@ -295,7 +296,12 @@ def screen_lead(lead, sender_email=None, subject=None, is_followup=False, follow
             'detail': followup_reason or 'AI classified this message as a follow-up or reply thread.'
         })
 
-    llm_result = llm_plausibility_screen(lead, lead.get('lead_details'))
+    llm_result = (
+        precomputed_llm_result
+        if isinstance(precomputed_llm_result, dict)
+        and precomputed_llm_result.get('fraud_risk') in _LLM_ALLOWED_RISK
+        else llm_plausibility_screen(lead, lead.get('lead_details'))
+    )
 
     combined_reasons = rule_reasons + llm_result['reasons']
     rule_risk = 'review' if rule_reasons else 'clear'

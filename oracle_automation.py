@@ -38,6 +38,7 @@ class OracleLeadAutomator:
         self.session_check_timeout = config.get('session_check_timeout_ms', 10_000)
 
         self._pw = self._browser = self._ctx = self.page = None
+        self._save_clicked = False
 
     # ------------------------------------------------------------------
     # Context manager
@@ -252,6 +253,7 @@ class OracleLeadAutomator:
         leads (e.g. 'Inquiry') -- these aren't trade show contacts, and mislabeling
         them would be a real, visible inaccuracy in Oracle, not just cosmetic.
         """
+        self._save_clicked = False
         # Build the Project Name
         org   = (lead.get('organization') or '').upper().strip()
         first = (lead.get('first_name') or '').strip()
@@ -282,7 +284,8 @@ class OracleLeadAutomator:
         self.page.wait_for_timeout(2000)
 
         # --- Left column ---
-        self._fill_by_label('Project Name', project_name)
+        if not self._fill_by_label('Project Name', project_name):
+            raise RuntimeError('Required Oracle field "Project Name" could not be filled')
 
         # Existing Account/Contact matching is disabled for now (2026-07-20) --
         # selecting a match via _search_and_select_existing() leaves Oracle's
@@ -295,8 +298,10 @@ class OracleLeadAutomator:
         # rather than block real submissions on this bug. _search_and_select_existing()
         # itself is untouched/still used for Owner -- only this Account/Contact
         # call site is bypassed.
-        self._fill_by_label('New Account', lead.get('organization'))
-        self._fill_by_label('New Contact', name if name else None)
+        account_ok = self._fill_by_label('New Account', lead.get('organization'))
+        contact_ok = self._fill_by_label('New Contact', name if name else None)
+        if not account_ok and not contact_ok:
+            raise RuntimeError('Neither New Account nor New Contact could be filled')
 
         self._fill_by_label('Job Title',    lead.get('title'))
 
@@ -308,7 +313,8 @@ class OracleLeadAutomator:
         self._fill_by_label('Lead Details',  lead.get('lead_details'))
 
         # Lead Source dropdown
-        self._select_dropdown('Lead Source', self.lead_source)
+        if not self._select_dropdown('Lead Source', self.lead_source):
+            raise RuntimeError(f'Required Lead Source "{self.lead_source}" could not be selected')
 
         # Rank dropdown -- 'Cold' is deliberately never selected here, even if
         # somehow present on the lead: a lead that's actually cold/spam should
@@ -325,7 +331,8 @@ class OracleLeadAutomator:
 
         # Market dropdown -- mandatory field in Oracle. Default to INDUSTRIAL if unassigned.
         market = (lead.get('market') or 'INDUSTRIAL').strip().upper()
-        self._select_dropdown('Market', market)
+        if not self._select_dropdown('Market', market):
+            raise RuntimeError(f'Required Market "{market}" could not be selected')
 
         # Owner (Territory Manager) -- only overridden when territory_map.assign_tm()
         # produced a confident match; otherwise Oracle's default owner (whoever is
@@ -394,15 +401,19 @@ class OracleLeadAutomator:
                 file_chooser.set_files(str(path_obj))
                 logger.info('  ✓ Successfully attached email file via file chooser.')
                 return True
+        except Exception as e:
+            logger.warning(f'  File chooser attachment strategy failed: {e}')
 
-            # 2. Try direct file input element
+        try:
+            # 2. Try direct file input element. set_input_files also works
+            # when Oracle keeps the native input hidden.
             file_input = self.page.locator(file_input_sel).first
-            if file_input.is_visible(timeout=3_000):
+            if file_input.count():
                 file_input.set_input_files(str(path_obj))
                 logger.info('  ✓ Successfully attached email file via file input element.')
                 return True
         except Exception as e:
-            logger.warning(f'  Attachment attempt skipped or non-blocking: {e}')
+            logger.warning(f'  Direct-input attachment strategy failed: {e}')
         return False
 
     def submit_lead(self, lead, trade_show_name, source_label='Tradeshow'):
@@ -429,6 +440,7 @@ class OracleLeadAutomator:
             pass
 
         save_btn = self.page.locator('button:has-text("Save and Close")').first
+        self._save_clicked = True
         save_btn.click(force=True)
         self.page.wait_for_timeout(2000)  # let Oracle's ADF validation run before checking
 
@@ -448,8 +460,11 @@ class OracleLeadAutomator:
             logger.info(f'  Submitted: {project_name}')
             return True, project_name, None
         except PWTimeout:
-            error_detail = ('Save and Close did not return to the Leads list within the '
-                             'timeout (no error popup detected either)')
+            error_detail = (
+                'SUBMISSION_OUTCOME_UNKNOWN: Save and Close did not return to '
+                'the Leads list within the timeout and no validation popup was '
+                'detected. Check Oracle before retrying.'
+            )
             logger.error(f'  {error_detail}: {project_name}')
             self.screenshot(f'submit_timeout_{int(time.time())}.png')
             return False, project_name, error_detail
@@ -464,7 +479,7 @@ class OracleLeadAutomator:
         Tries three strategies to handle Oracle ADF's non-standard ID patterns.
         """
         if not value or not str(value).strip():
-            return
+            return False
         value = str(value).strip()
 
         # Strategy 1: Playwright's built-in get_by_label (works for standard HTML)
@@ -473,7 +488,7 @@ class OracleLeadAutomator:
             locator.wait_for(state='visible', timeout=5_000)
             locator.click()
             locator.fill(value)
-            return
+            return locator.input_value().strip() == value
         except Exception:
             pass
 
@@ -489,7 +504,7 @@ class OracleLeadAutomator:
                 field.wait_for(state='visible', timeout=5_000)
                 field.click()
                 field.fill(value)
-                return
+                return field.input_value().strip() == value
         except Exception:
             pass
 
@@ -502,11 +517,12 @@ class OracleLeadAutomator:
             field.wait_for(state='visible', timeout=5_000)
             field.click()
             field.fill(value)
-            return
+            return field.input_value().strip() == value
         except Exception:
             pass
 
         logger.warning(f"  Could not fill '{label_text}' — all strategies failed")
+        return False
 
     def _fill_phone(self, raw_phone):
         """Parse the phone string and fill the correct Oracle phone fields."""
@@ -571,7 +587,7 @@ class OracleLeadAutomator:
         Select a value from an Oracle ADF dropdown (selectOneChoice).
         """
         if not value or not str(value).strip():
-            return
+            return False
         value = str(value).strip()
 
         try:
@@ -590,7 +606,7 @@ class OracleLeadAutomator:
             option.wait_for(state='visible', timeout=5000)
             option.click()
             self.page.wait_for_timeout(300)
-            return
+            return True
         except Exception:
             # Always close lingering popup if selection failed
             try:
@@ -606,8 +622,10 @@ class OracleLeadAutomator:
             field.fill(value)
             self.page.keyboard.press("Tab")
             self.page.wait_for_timeout(300)
+            return True
         except Exception as e:
             logger.warning(f"  Could not select '{value}' in '{label_text}': {e}")
+            return False
 
     def _search_and_select_existing(self, label_text, search_text):
         """

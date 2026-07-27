@@ -40,6 +40,13 @@
                   <form method="post" action="{{ url_for('restore', lead_id=lead.id) }}" style="display:inline; margin:0;">
                     <button type="submit" class="btn-secondary" style="font-size: 0.78rem; padding: 0.3rem 0.6rem; white-space: nowrap;">Return to Review</button>
                   </form>
+                {% elif lead.status == 'submission_unknown' %}
+                  <form method="post" action="{{ url_for('unknown_confirmed', lead_id=lead.id) }}" style="display:inline; margin:0;">
+                    <button type="submit" class="btn-approve" style="font-size: 0.72rem; padding: 0.3rem 0.55rem; white-space: nowrap;">Confirmed in Oracle</button>
+                  </form>
+                  <form method="post" action="{{ url_for('unknown_retry', lead_id=lead.id) }}" style="display:inline; margin:0;">
+                    <button type="submit" class="btn-secondary" style="font-size: 0.72rem; padding: 0.3rem 0.55rem; white-space: nowrap;">Checked—Retry</button>
+                  </form>
                 {% endif %}
               </td>
             </tr>

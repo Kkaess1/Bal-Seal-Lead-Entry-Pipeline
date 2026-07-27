@@ -2,12 +2,15 @@
   "oracle": {
     "base_url": "https://cagc.fa.us1.oraclecloud.com",
     "lead_source": "Trade Show",
+    "campaign_name": "Seal Starter",
     "headless": false,
     "slow_mo_ms": 150,
     "manual_login": false,
     "storage_state_path": "auth/oracle_storage_state.json",
     "session_check_timeout_ms": 10000,
-    "auto_submit": true
+    "auto_submit": true,
+    "submission_method": "api",
+    "api_timeout_seconds": 60
   },
   "graph": {
     "client_id": "",

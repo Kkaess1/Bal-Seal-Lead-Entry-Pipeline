@@ -6,7 +6,7 @@ Plain sqlite3, no ORM — mirrors the flat function-based style of excel_parser.
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / 'pipeline.db'
@@ -19,14 +19,15 @@ DB_PATH = Path(__file__).parent / 'pipeline.db'
 # with the lead the same way every other Oracle-bound field does.
 LEAD_SCHEMA_FIELDS = [
     'first_name', 'last_name', 'organization', 'title', 'phone', 'phone_mobile',
-    'email', 'address1', 'address2', 'city', 'state', 'zip', 'country',
+    'email', 'website', 'address1', 'address2', 'city', 'state', 'zip', 'country',
     'notes_action', 'notes_body', 'survey_answers', 'qualifiers', 'rank',
-    'scan_device', 'lead_details', 'assigned_tm', 'market',
+    'scan_device', 'lead_details', 'campaign', 'assigned_tm', 'market',
 ]
 
 LEAD_STATUSES = (
     'ingested', 'extracted', 'screened', 'pending_review',
-    'review_approved', 'approved', 'rejected', 'submitted', 'failed', 'duplicate',
+    'review_approved', 'approved', 'submitting', 'submission_unknown',
+    'rejected', 'submitted', 'failed', 'duplicate',
 )
 
 
@@ -35,9 +36,10 @@ def _now():
 
 
 def get_connection(db_path=DB_PATH):
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
+    conn.execute('PRAGMA busy_timeout = 30000')
     return conn
 
 
@@ -57,6 +59,8 @@ def init_db(db_path=DB_PATH):
                 status                TEXT NOT NULL DEFAULT 'new',
                 error_detail          TEXT,
                 processed_at          TEXT,
+                attempt_count         INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at       TEXT,
                 created_at            TEXT NOT NULL
             );
 
@@ -65,6 +69,7 @@ def init_db(db_path=DB_PATH):
                 message_id             INTEGER REFERENCES messages(id),
                 source                 TEXT NOT NULL,
                 source_row_number      INTEGER,
+                ingest_key             TEXT,
                 dedup_key              TEXT,
                 duplicate_of_lead_id   INTEGER REFERENCES leads(id),
 
@@ -87,6 +92,11 @@ def init_db(db_path=DB_PATH):
                 oracle_project_name    TEXT,
                 submit_error           TEXT,
                 submit_screenshot_path TEXT,
+                submission_attempt_count INTEGER NOT NULL DEFAULT 0,
+                submitting_started_at  TEXT,
+                next_attempt_at        TEXT,
+                oracle_record_id       TEXT,
+                field_warnings         TEXT,
 
                 created_at             TEXT NOT NULL,
                 updated_at             TEXT NOT NULL
@@ -94,24 +104,47 @@ def init_db(db_path=DB_PATH):
 
             CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
             CREATE INDEX IF NOT EXISTS idx_leads_dedup_key ON leads(dedup_key);
-
             CREATE TABLE IF NOT EXISTS run_state (
                 key        TEXT PRIMARY KEY,
                 value      TEXT,
                 updated_at TEXT NOT NULL
             );
         """)
+        conn.execute('PRAGMA journal_mode = WAL')
         conn.commit()
         _migrate_leads_columns(conn)
+        _migrate_messages_columns(conn)
     finally:
         conn.close()
 
 
 def _migrate_leads_columns(conn):
     existing = {row[1] for row in conn.execute('PRAGMA table_info(leads)')}
-    for field in LEAD_SCHEMA_FIELDS + ['assigned_tm_basis', 'parent_lead_id']:
+    text_fields = LEAD_SCHEMA_FIELDS + [
+        'assigned_tm_basis', 'parent_lead_id', 'ingest_key',
+        'submitting_started_at', 'next_attempt_at', 'oracle_record_id',
+        'field_warnings',
+    ]
+    for field in text_fields:
         if field not in existing:
             conn.execute(f'ALTER TABLE leads ADD COLUMN {field} TEXT')
+    if 'submission_attempt_count' not in existing:
+        conn.execute(
+            'ALTER TABLE leads ADD COLUMN submission_attempt_count INTEGER NOT NULL DEFAULT 0'
+        )
+    conn.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_ingest_key '
+        'ON leads(ingest_key) WHERE ingest_key IS NOT NULL'
+    )
+    conn.commit()
+
+
+def _migrate_messages_columns(conn):
+    existing = {row[1] for row in conn.execute('PRAGMA table_info(messages)')}
+    if 'attempt_count' not in existing:
+        conn.execute('ALTER TABLE messages ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0')
+    if 'last_attempt_at' not in existing:
+        conn.execute('ALTER TABLE messages ADD COLUMN last_attempt_at TEXT')
     conn.commit()
 
 
@@ -188,6 +221,80 @@ def update_message_status(message_id, status, error_detail=None, conn=None):
             conn.close()
 
 
+def claim_message(message_id, conn=None):
+    """Atomically claim a new/error message for processing."""
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        cur = conn.execute(
+            """UPDATE messages
+               SET status = 'processing', error_detail = NULL,
+                   attempt_count = attempt_count + 1, last_attempt_at = ?
+               WHERE id = ? AND status IN ('new', 'error')""",
+            (_now(), message_id),
+        )
+        if owns_conn:
+            conn.commit()
+        return cur.rowcount == 1
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def list_messages(status=None, conn=None):
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        if status is None:
+            rows = conn.execute('SELECT * FROM messages ORDER BY received_at, id').fetchall()
+        else:
+            statuses = [status] if isinstance(status, str) else list(status)
+            placeholders = ', '.join('?' for _ in statuses)
+            rows = conn.execute(
+                f'SELECT * FROM messages WHERE status IN ({placeholders}) '
+                'ORDER BY received_at, id',
+                statuses,
+            ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def count_messages_by_status(conn=None):
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        rows = conn.execute(
+            'SELECT status, COUNT(*) AS count FROM messages GROUP BY status'
+        ).fetchall()
+        return {row['status']: row['count'] for row in rows}
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def release_stale_message_claims(max_age_minutes=90, conn=None):
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)).isoformat()
+        cur = conn.execute(
+            """UPDATE messages
+               SET status = 'error',
+                   error_detail = 'Previous ingestion process stopped while handling this message.'
+               WHERE status = 'processing'
+                 AND (last_attempt_at IS NULL OR last_attempt_at < ?)""",
+            (cutoff,),
+        )
+        if owns_conn:
+            conn.commit()
+        return cur.rowcount
+    finally:
+        if owns_conn:
+            conn.close()
+
+
 # ---------------------------------------------------------------------------
 # leads
 # ---------------------------------------------------------------------------
@@ -222,7 +329,8 @@ def find_duplicate_lead(dedup_key, exclude_lead_id=None, conn=None):
 
 
 def insert_lead(lead, source, message_id=None, source_row_number=None,
-                 status='ingested', conn=None):
+                 status='ingested', ingest_key=None, replace_existing=False,
+                 conn=None):
     """
     Insert a new lead. `lead` is a dict using the LEAD_SCHEMA_FIELDS keys
     (same shape excel_parser.parse_excel() already produces).
@@ -232,6 +340,25 @@ def insert_lead(lead, source, message_id=None, source_row_number=None,
     owns_conn = conn is None
     conn = conn or get_connection()
     try:
+        if ingest_key:
+            existing = conn.execute(
+                'SELECT id FROM leads WHERE ingest_key = ?', (ingest_key,)
+            ).fetchone()
+            if existing:
+                lead_id = existing['id']
+                if replace_existing:
+                    fields = {field: lead.get(field) for field in LEAD_SCHEMA_FIELDS}
+                    fields.update({
+                        'source_row_number': source_row_number,
+                        'dedup_key': compute_dedup_key(lead),
+                        'status': status,
+                        'submit_error': None,
+                    })
+                    update_lead_fields(lead_id, fields, conn=conn)
+                if owns_conn:
+                    conn.commit()
+                return lead_id
+
         dedup_key = compute_dedup_key(lead)
         dup = find_duplicate_lead(dedup_key, conn=conn)
         duplicate_of_lead_id = dup['id'] if dup else None
@@ -239,12 +366,14 @@ def insert_lead(lead, source, message_id=None, source_row_number=None,
         now = _now()
         field_values = [lead.get(f) for f in LEAD_SCHEMA_FIELDS]
         columns = (
-            ['message_id', 'source', 'source_row_number', 'dedup_key', 'duplicate_of_lead_id']
+            ['message_id', 'source', 'source_row_number', 'ingest_key',
+             'dedup_key', 'duplicate_of_lead_id']
             + LEAD_SCHEMA_FIELDS
             + ['status', 'created_at', 'updated_at']
         )
         values = (
-            [message_id, source, source_row_number, dedup_key, duplicate_of_lead_id]
+            [message_id, source, source_row_number, ingest_key,
+             dedup_key, duplicate_of_lead_id]
             + field_values
             + [status, now, now]
         )
@@ -287,6 +416,40 @@ def list_leads(status=None, conn=None):
                 statuses,
             ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def count_leads(status=None, conn=None):
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        if status is None:
+            return conn.execute('SELECT COUNT(*) FROM leads').fetchone()[0]
+        statuses = [status] if isinstance(status, str) else list(status)
+        placeholders = ', '.join('?' for _ in statuses)
+        return conn.execute(
+            f'SELECT COUNT(*) FROM leads WHERE status IN ({placeholders})', statuses
+        ).fetchone()[0]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def list_ready_for_submission(conn=None):
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        now = _now()
+        rows = conn.execute(
+            """SELECT * FROM leads
+               WHERE status = 'approved'
+                 AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+               ORDER BY created_at""",
+            (now,),
+        ).fetchall()
+        return [dict(row) for row in rows]
     finally:
         if owns_conn:
             conn.close()
@@ -363,7 +526,19 @@ def approve_lead(lead_id, reviewed_by=None, review_notes=None, edited_fields=Non
         'reviewed_at': _now(),
         'review_notes': review_notes,
     })
-    update_lead_fields(lead_id, fields, conn=conn)
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        current = conn.execute('SELECT status FROM leads WHERE id = ?', (lead_id,)).fetchone()
+        if not current or current['status'] not in ('pending_review', 'review_approved'):
+            return False
+        update_lead_fields(lead_id, fields, conn=conn)
+        if owns_conn:
+            conn.commit()
+        return True
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 def finalize_approved_batch(reviewed_by=None, conn=None):
@@ -433,18 +608,108 @@ def get_lead_email_attachment(lead_id, conn=None):
     return str(file_path)
 
 
-def mark_lead_submitted(lead_id, oracle_project_name, conn=None):
-    update_lead_fields(
-        lead_id,
-        {'status': 'submitted', 'submitted_at': _now(), 'oracle_project_name': oracle_project_name},
-        conn=conn,
-    )
+def mark_lead_submitted(lead_id, oracle_project_name, oracle_record_id=None,
+                        field_warnings=None, conn=None):
+    fields = {
+        'status': 'submitted', 'submitted_at': _now(),
+        'oracle_project_name': oracle_project_name,
+        'submitting_started_at': None, 'next_attempt_at': None,
+        'submit_error': None,
+    }
+    if oracle_record_id:
+        fields['oracle_record_id'] = str(oracle_record_id)
+    if field_warnings:
+        fields['field_warnings'] = (
+            json.dumps(field_warnings)
+            if not isinstance(field_warnings, str)
+            else field_warnings
+        )
+    update_lead_fields(lead_id, fields, conn=conn)
 
 
 def mark_lead_failed(lead_id, submit_error, submit_screenshot_path=None, conn=None):
     update_lead_fields(
         lead_id,
-        {'status': 'failed', 'submit_error': submit_error, 'submit_screenshot_path': submit_screenshot_path},
+        {
+            'status': 'failed', 'submit_error': submit_error,
+            'submit_screenshot_path': submit_screenshot_path,
+            'submitting_started_at': None,
+        },
+        conn=conn,
+    )
+
+
+def claim_lead_for_submission(lead_id, conn=None):
+    """Atomically move one approved lead into the submitting state."""
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        now = _now()
+        cur = conn.execute(
+            """UPDATE leads
+               SET status = 'submitting', submitting_started_at = ?,
+                   submission_attempt_count = submission_attempt_count + 1,
+                   updated_at = ?
+               WHERE id = ? AND status = 'approved'
+                 AND (next_attempt_at IS NULL OR next_attempt_at <= ?)""",
+            (now, now, lead_id, now),
+        )
+        if owns_conn:
+            conn.commit()
+        return cur.rowcount == 1
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def release_stale_submission_claims(max_age_minutes=90, conn=None):
+    """Recover claims left behind by a crashed submit process."""
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)).isoformat()
+        cur = conn.execute(
+            """UPDATE leads
+               SET status = 'submission_unknown', updated_at = ?,
+                   submit_error = COALESCE(
+                       submit_error,
+                       'Submission process stopped while this lead was in progress; reconcile in Oracle before retrying.'
+                   )
+               WHERE status = 'submitting' AND submitting_started_at < ?""",
+            (_now(), cutoff),
+        )
+        if owns_conn:
+            conn.commit()
+        return cur.rowcount
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def mark_submission_unknown(lead_id, detail, screenshot_path=None,
+                            oracle_project_name=None, conn=None):
+    update_lead_fields(
+        lead_id,
+        {
+            'status': 'submission_unknown', 'submit_error': detail,
+            'submit_screenshot_path': screenshot_path,
+            'submitting_started_at': None,
+            'oracle_project_name': oracle_project_name,
+        },
+        conn=conn,
+    )
+
+
+def schedule_lead_retry(lead_id, detail, delay_minutes=15, conn=None):
+    next_attempt = (
+        datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+    ).isoformat()
+    update_lead_fields(
+        lead_id,
+        {
+            'status': 'approved', 'submit_error': detail,
+            'submitting_started_at': None, 'next_attempt_at': next_attempt,
+        },
         conn=conn,
     )
 

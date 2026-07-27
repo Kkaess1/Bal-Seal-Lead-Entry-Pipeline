@@ -1,100 +1,83 @@
+"""Normalize common domestic and international phone formats for Oracle."""
+
 import re
+
+
+_CALLING_CODES = {
+    '1', '7', '20', '27', '30', '31', '32', '33', '34', '36', '39', '40',
+    '41', '43', '44', '45', '46', '47', '48', '49', '51', '52', '53', '54',
+    '55', '56', '57', '58', '60', '61', '62', '63', '64', '65', '66', '81',
+    '82', '84', '86', '90', '91', '92', '93', '94', '95', '98', '211',
+    '212', '213', '216', '218', '220', '221', '222', '223', '224', '225',
+    '226', '227', '228', '229', '230', '231', '232', '233', '234', '235',
+    '236', '237', '238', '239', '240', '241', '242', '243', '244', '245',
+    '246', '248', '249', '250', '251', '252', '253', '254', '255', '256',
+    '257', '258', '260', '261', '262', '263', '264', '265', '266', '267',
+    '268', '269', '290', '291', '297', '298', '299', '350', '351', '352',
+    '353', '354', '355', '356', '357', '358', '359', '370', '371', '372',
+    '373', '374', '375', '376', '377', '378', '379', '380', '381', '382',
+    '383', '385', '386', '387', '389', '420', '421', '423', '500', '501',
+    '502', '503', '504', '505', '506', '507', '508', '509', '590', '591',
+    '592', '593', '594', '595', '596', '597', '598', '599', '670', '672',
+    '673', '674', '675', '676', '677', '678', '679', '680', '681', '682',
+    '683', '685', '686', '687', '688', '689', '690', '691', '692', '850',
+    '852', '853', '855', '856', '880', '886', '960', '961', '962', '963',
+    '964', '965', '966', '967', '968', '970', '971', '972', '973', '974',
+    '975', '976', '977', '992', '993', '994', '995', '996', '998',
+}
+
+
+def _split_calling_code(digits):
+    for width in (3, 2, 1):
+        candidate = digits[:width]
+        if candidate in _CALLING_CODES:
+            return candidate, digits[width:]
+    return None, digits
 
 
 def parse_phone(raw):
     """
-    Parse a phone string into its components.
+    Return Oracle phone components or ``None`` for an unusable number.
 
-    Returns a dict:
-      {
-        'type': 'work' | 'mobile',   # which Oracle fields to fill
-        'country_code': str,          # e.g. '1', '33'
-        'area_code':    str,          # e.g. '281'
-        'number':       str,          # e.g. '997-3300'
-      }
-    Returns None if the string is empty or unparseable.
-
-    Examples handled:
-      '281-997-3300'             → work  | 1  | 281 | 997-3300
-      '+1-310-739-8930'          → work  | 1  | 310 | 739-8930
-      '+3-368-571-6706'          → mobile| 3  | 368 | 571-6706
-      '+00-861-598-818-0124'     → mobile| 86 | 159 | 8818-0124
-      '(713) 941-3797'           → work  | 1  | 713 | 941-3797
+    Extension text is deliberately omitted because Oracle has no extension
+    field in this form. Numbers without an international prefix are treated
+    as North American numbers.
     """
     if not raw or not str(raw).strip():
         return None
 
-    s = str(raw).strip()
+    value = str(raw).strip()
+    value = re.split(r'\b(?:ext(?:ension)?|x)\b\.?\s*\d+', value, flags=re.I)[0]
+    international = value.startswith('+') or value.startswith('00')
+    digits = re.sub(r'\D', '', value)
+    if value.startswith('00'):
+        digits = digits[2:]
 
-    # Strip leading/trailing whitespace and common noise
-    s = re.sub(r'[\s\(\)]', '-', s)      # spaces and parens → dashes
-    s = re.sub(r'-{2,}', '-', s)          # collapse multiple dashes
-    s = re.sub(r'^-|-$', '', s)            # strip leading/trailing dashes
-
-    # Determine if there's an explicit country code prefix (+X or 00X)
-    has_plus = s.startswith('+')
-    has_double_zero = s.startswith('00')
-
-    if has_plus:
-        s = s[1:]  # remove leading +
-    elif has_double_zero:
-        s = s[2:]  # remove leading 00
-
-    parts = s.split('-')
-    parts = [p for p in parts if p]  # remove empty segments
-
-    if not parts:
-        return None
-
-    # --- Determine country code ---
-    if has_plus or has_double_zero:
-        # First segment is country code — but handle +00CC where CC runs into next digits
-        raw_cc = parts[0].lstrip('0')
-        if not raw_cc:
-            # e.g. '+00-86-...' → raw_cc was '00', actual CC is next segment
-            country_code = parts[1].lstrip('0') or '0'
-            remaining = parts[2:]
-        else:
-            country_code = raw_cc
-            remaining = parts[1:]
+    if international:
+        country_code, national = _split_calling_code(digits)
+        if not country_code:
+            return None
     else:
-        # No explicit country code — assume US (+1)
         country_code = '1'
-        remaining = parts
+        national = digits[1:] if len(digits) == 11 and digits.startswith('1') else digits
 
-    country_code = country_code or '1'
-
-    # --- Build area code and number from remaining parts ---
-    if not remaining:
+    if len(national) < 7:
         return None
 
-    if len(remaining) == 1:
-        # Everything lumped together, e.g. '2819973300'
-        digits = re.sub(r'\D', '', remaining[0])
-        if len(digits) >= 10:
-            area_code = digits[:3]
-            number = digits[3:6] + '-' + digits[6:]
-        elif len(digits) >= 7:
-            area_code = ''
-            number = digits[:3] + '-' + digits[3:]
-        else:
-            area_code = ''
-            number = digits
-    elif len(remaining) == 2:
-        area_code = re.sub(r'\D', '', remaining[0])
-        num_digits = re.sub(r'\D', '', remaining[1])
-        number = num_digits[:4] + '-' + num_digits[4:] if len(num_digits) > 4 else num_digits
-    else:
-        # 3+ parts: first is area code, rest form the number
-        area_code = re.sub(r'\D', '', remaining[0])
-        num_parts = remaining[1:]
-        joined = '-'.join(num_parts)
-        number = joined
-
-    phone_type = 'work' if country_code == '1' else 'mobile'
+    # Oracle splits phones into country/area/local fields. Area-code lengths
+    # vary internationally; these common two-digit plans cover current data,
+    # while three digits is a conservative fallback.
+    area_width = 3 if country_code == '1' else (
+        2 if country_code in {'20', '27', '30', '31', '32', '33', '34', '36',
+                              '39', '40', '41', '43', '44', '45', '46', '47',
+                              '48', '49'} else 3
+    )
+    area_code = national[:area_width]
+    local = national[area_width:]
+    number = f'{local[:3]}-{local[3:]}' if len(local) > 4 else local
 
     return {
-        'type': phone_type,
+        'type': 'work' if country_code == '1' else 'mobile',
         'country_code': country_code,
         'area_code': area_code,
         'number': number,
@@ -102,15 +85,8 @@ def parse_phone(raw):
 
 
 if __name__ == '__main__':
-    tests = [
-        '281-997-3300',
-        '+1-310-739-8930',
-        '+3-368-571-6706',
-        '+00-861-598-818-0124',
-        '(713) 941-3797',
-        '1-800-555-1234',
-        '',
-        None,
-    ]
-    for t in tests:
-        print(f'{str(t):<35} -> {parse_phone(t)}')
+    for sample in (
+        '281-997-3300', '1-800-555-1234', '+1-310-739-8930',
+        '+44 20 7946 0958', '+442012345678', '(713) 941-3797',
+    ):
+        print(f'{sample:<25} -> {parse_phone(sample)}')

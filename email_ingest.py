@@ -119,7 +119,7 @@ def download_excel_attachments(message_id):
     paths = []
     for att in resp.json().get('value', []):
         name = att.get('name') or ''
-        if not name.lower().endswith(('.xlsx', '.xls')):
+        if not name.lower().endswith('.xlsx'):
             continue
         content_bytes = att.get('contentBytes')
         if not content_bytes:

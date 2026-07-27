@@ -55,4 +55,37 @@
     </div>
   {% endfor %}
 
+  <!-- OSC Scheduled Submission Queue Section -->
+  <div style="margin-top: 3rem; padding-top: 1.5rem; border-top: 2px solid var(--border);">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; margin-bottom:1rem;">
+      <div>
+        <h3 style="margin:0; font-size: 1.15rem; font-weight: 700; color: var(--text);">Awaiting Scheduled OSC Submission ({{ ready_leads|length }})</h3>
+      </div>
+    </div>
+
+    {% if not ready_leads %}
+      <div style="padding: 1.5rem; background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; text-align: center; color: var(--text-muted); font-size: 0.9rem;">
+        No approved leads currently waiting in the OSC submission queue.
+      </div>
+    {% else %}
+      {% for lead in ready_leads %}
+        <div class="card" style="margin-bottom: 0.75rem; border-left: 3px solid var(--success);">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+            <div>
+              <div style="font-weight: 700; font-size: 1rem; color: var(--text);">
+                {{ lead.display_name }}{% if lead.organization %} &mdash; {{ lead.organization }}{% endif %}
+              </div>
+              <div class="meta" style="margin-top: 0.2rem;">
+                Status: <span style="font-weight: 600; color: var(--success);">Approved (Ready for OSC Sync)</span> &bull; 
+                Market: <strong>{{ lead.market or 'INDUSTRIAL' }}</strong> &bull; 
+                TM: <strong>{{ lead.assigned_tm or 'Unassigned' }}</strong>
+              </div>
+            </div>
+            <span class="badge badge-clear" style="margin: 0;">Queued for OSC</span>
+          </div>
+        </div>
+      {% endfor %}
+    {% endif %}
+  </div>
+
 {% endblock %}
