@@ -18,6 +18,10 @@ auth/
 email_cache/
 logs/
 
+# Real lead data (contains third-party PII) -- never commit actual lead
+# spreadsheets, only code that processes them
+input/
+
 dashboard.log
 
 # Editor files
