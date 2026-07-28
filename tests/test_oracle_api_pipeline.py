@@ -302,6 +302,14 @@ class RunApiSubmitTests(unittest.TestCase):
         db.DB_PATH = self._db_path
 
     def tearDown(self):
+        try:
+            conn = db.get_connection()
+            conn.execute("DELETE FROM leads")
+            conn.execute("DELETE FROM messages")
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
         db.DB_PATH = self._original_db_path
 
     def _insert_approved(self, extra=None):
