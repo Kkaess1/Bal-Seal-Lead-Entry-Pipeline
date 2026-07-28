@@ -71,6 +71,27 @@ def _decorate(lead):
         lead['details_flat'] = email_cleaner.condense_paragraphs(cleaned) if cleaned else None
     lead['email_thread'] = db.get_lead_email_thread(lead['id'])
     lead['has_followup'] = len(lead['email_thread']) > 1
+
+    # Extract & format the date the email was received / sent
+    raw_date = None
+    if lead['email_thread'] and lead['email_thread'][0].get('received_at'):
+        raw_date = lead['email_thread'][0]['received_at']
+    elif lead.get('created_at'):
+        raw_date = lead['created_at']
+
+    if raw_date:
+        try:
+            # Parse ISO date string and format nicely (e.g., Jul 23, 2026 11:08 AM)
+            dt = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
+            lead['received_date_formatted'] = dt.strftime('%b %d, %Y %I:%M %p')
+            lead['received_date_short'] = dt.strftime('%b %d, %Y')
+        except Exception:
+            lead['received_date_formatted'] = raw_date[:16].replace('T', ' ')
+            lead['received_date_short'] = raw_date[:10]
+    else:
+        lead['received_date_formatted'] = None
+        lead['received_date_short'] = None
+
     return lead
 
 

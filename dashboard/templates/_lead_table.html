@@ -4,6 +4,7 @@
   <tr><td>Email</td><td>{{ lead.email or '—' }}</td></tr>
   <tr><td>Phone</td><td>{{ lead.phone or lead.phone_mobile or '—' }}</td></tr>
   <tr><td>Location</td><td>{{ lead.location or '—' }}</td></tr>
+  <tr><td>Email Date</td><td>{% if lead.received_date_formatted %}<strong>{{ lead.received_date_formatted }}</strong>{% else %}<span class="meta">Unknown</span>{% endif %}</td></tr>
   <tr>
     <td>Territory</td>
     <td>{% if lead.assigned_tm %}{{ lead.assigned_tm }}{% else %}<span class="text-warn">Unassigned</span>{% endif %}</td>

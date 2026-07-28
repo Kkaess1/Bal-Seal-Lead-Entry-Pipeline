@@ -13,6 +13,7 @@
             <th style="padding: 0.6rem; min-width: 140px;">Name</th>
             <th style="padding: 0.6rem; min-width: 140px;">Organization</th>
             <th style="padding: 0.6rem; min-width: 180px;">Email</th>
+            <th style="padding: 0.6rem; width: 140px; white-space: nowrap;">Email Date</th>
             <th style="padding: 0.6rem; width: 140px; white-space: nowrap;">Reviewed</th>
             <th style="padding: 0.6rem; min-width: 160px;">Notes</th>
             <th style="padding: 0.6rem; width: 130px; text-align: right;">Action</th>
@@ -29,6 +30,9 @@
               </td>
               <td style="padding: 0.65rem 0.6rem; vertical-align: top;">{{ lead.organization or '—' }}</td>
               <td style="padding: 0.65rem 0.6rem; vertical-align: top; word-break: break-all;">{{ lead.email or '—' }}</td>
+              <td style="padding: 0.65rem 0.6rem; vertical-align: top; white-space: nowrap; font-size: 0.85rem;">
+                {{ lead.received_date_short or '—' }}
+              </td>
               <td style="padding: 0.65rem 0.6rem; vertical-align: top; white-space: nowrap; font-size: 0.85rem;">
                 {{ (lead.reviewed_at or '')[:16]|replace('T', ' ') or '—' }}
               </td>
