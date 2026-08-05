@@ -11,8 +11,13 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / 'pipeline.db'
 
+# Where get_lead_email_attachment() writes its last-resort reconstructed email
+# file. Shares pipeline_ingest.py's cache directory (gitignored -- these files
+# contain lead PII). Module-level so tests can redirect it.
+EMAIL_CACHE_DIR = Path(__file__).parent / 'email_cache'
+
 # Fields copied 1:1 from excel_parser.py's lead schema so leads can be handed
-# straight to oracle_automation.create_lead() regardless of source. `assigned_tm`
+# straight to oracle_api.build_lead_payload() regardless of source. `assigned_tm`
 # and `market` are additions beyond that original schema -- they feed Oracle's
 # "Owner" and "Market" fields (via territory_map.assign_tm() and
 # lead_extractor.py's market classification, respectively) and need to travel
@@ -35,7 +40,12 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_connection(db_path=DB_PATH):
+def get_connection(db_path=None):
+    # Resolved at call time, NOT bound as a default argument. As a default,
+    # db_path=DB_PATH captured the module-level value at import, so tests that
+    # point db.DB_PATH at a temp file were silently still connecting to the
+    # real pipeline.db -- including their tearDown's DELETE FROM leads.
+    db_path = db_path or DB_PATH
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
@@ -43,19 +53,26 @@ def get_connection(db_path=DB_PATH):
     return conn
 
 
-def init_db(db_path=DB_PATH):
+def init_db(db_path=None):
     conn = get_connection(db_path)
     try:
         conn.executescript(f"""
             CREATE TABLE IF NOT EXISTS messages (
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_message_id     TEXT UNIQUE NOT NULL,
+                conversation_id       TEXT,
+                ingest_batch_id       TEXT,
                 received_at           TEXT,
                 sender_email          TEXT,
                 sender_name           TEXT,
                 subject               TEXT,
                 has_excel_attachment  INTEGER DEFAULT 0,
+                attachments           TEXT,
                 body_cache_path       TEXT,
+                translated_body_cache_path TEXT,
+                original_language     TEXT,
+                translated_subject    TEXT,
+                message_file_path     TEXT,
                 status                TEXT NOT NULL DEFAULT 'new',
                 error_detail          TEXT,
                 processed_at          TEXT,
@@ -97,6 +114,7 @@ def init_db(db_path=DB_PATH):
                 next_attempt_at        TEXT,
                 oracle_record_id       TEXT,
                 field_warnings         TEXT,
+                alert_dismissed_at     TEXT,
 
                 created_at             TEXT NOT NULL,
                 updated_at             TEXT NOT NULL
@@ -123,7 +141,7 @@ def _migrate_leads_columns(conn):
     text_fields = LEAD_SCHEMA_FIELDS + [
         'assigned_tm_basis', 'parent_lead_id', 'ingest_key',
         'submitting_started_at', 'next_attempt_at', 'oracle_record_id',
-        'field_warnings',
+        'field_warnings', 'alert_dismissed_at',
     ]
     for field in text_fields:
         if field not in existing:
@@ -145,6 +163,31 @@ def _migrate_messages_columns(conn):
         conn.execute('ALTER TABLE messages ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0')
     if 'last_attempt_at' not in existing:
         conn.execute('ALTER TABLE messages ADD COLUMN last_attempt_at TEXT')
+    if 'message_file_path' not in existing:
+        conn.execute('ALTER TABLE messages ADD COLUMN message_file_path TEXT')
+    if 'attachments' not in existing:
+        # JSON list of {name, size, kind} describing what the sender attached.
+        # Metadata only -- the files themselves are deliberately never written
+        # to disk or served by the dashboard. See record_attachments().
+        conn.execute('ALTER TABLE messages ADD COLUMN attachments TEXT')
+    if 'translated_body_cache_path' not in existing:
+        conn.execute('ALTER TABLE messages ADD COLUMN translated_body_cache_path TEXT')
+    if 'original_language' not in existing:
+        conn.execute('ALTER TABLE messages ADD COLUMN original_language TEXT')
+    if 'translated_subject' not in existing:
+        conn.execute('ALTER TABLE messages ADD COLUMN translated_subject TEXT')
+    if 'conversation_id' not in existing:
+        conn.execute('ALTER TABLE messages ADD COLUMN conversation_id TEXT')
+    if 'ingest_batch_id' not in existing:
+        conn.execute('ALTER TABLE messages ADD COLUMN ingest_batch_id TEXT')
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_messages_conversation '
+        'ON messages(conversation_id)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_messages_ingest_batch '
+        'ON messages(ingest_batch_id)'
+    )
     conn.commit()
 
 
@@ -154,7 +197,8 @@ def _migrate_messages_columns(conn):
 
 def insert_message(source_message_id, received_at=None, sender_email=None,
                     sender_name=None, subject=None, has_excel_attachment=False,
-                    body_cache_path=None, conn=None):
+                    body_cache_path=None, message_file_path=None,
+                    conversation_id=None, ingest_batch_id=None, conn=None):
     """
     Insert a new message row. Returns its id, or None if source_message_id
     already exists (hard dedup on the unique constraint). source_message_id
@@ -167,11 +211,14 @@ def insert_message(source_message_id, received_at=None, sender_email=None,
     try:
         cur = conn.execute(
             """INSERT OR IGNORE INTO messages
-               (source_message_id, received_at, sender_email, sender_name, subject,
-                has_excel_attachment, body_cache_path, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
-            (source_message_id, received_at, sender_email, sender_name, subject,
-             int(has_excel_attachment), body_cache_path, _now()),
+               (source_message_id, conversation_id, ingest_batch_id,
+                received_at, sender_email, sender_name, subject,
+                has_excel_attachment, body_cache_path, message_file_path,
+                status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
+            (source_message_id, conversation_id, ingest_batch_id,
+             received_at, sender_email, sender_name, subject,
+             int(has_excel_attachment), body_cache_path, message_file_path, _now()),
         )
         if owns_conn:
             conn.commit()
@@ -189,6 +236,57 @@ def get_message_by_source_id(source_message_id, conn=None):
             'SELECT * FROM messages WHERE source_message_id = ?', (source_message_id,)
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def record_attachments(message_id, attachments, conn=None):
+    """
+    Store what the sender attached, as metadata only.
+
+    The files themselves are deliberately never written to disk and never
+    served by the dashboard: a lead's attachments are whatever a stranger
+    chose to email us, and the safe thing to do with that is describe it, not
+    host it. A rep who needs the actual file opens the source email in
+    Outlook, which keeps the file inside the protections Outlook and the mail
+    gateway already apply to it.
+
+    `attachments` is a list of {name, size, kind} dicts.
+    """
+    update_message_fields(message_id, {'attachments': json.dumps(attachments or [])}, conn=conn)
+
+
+def get_message_attachments(message_id, conn=None):
+    """Attachment metadata for a message, or [] when there is none. Tolerates
+    a malformed/legacy value rather than breaking the page that renders it."""
+    if not message_id:
+        return []
+    message = get_message(message_id, conn=conn) or {}
+    raw = message.get('attachments')
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def update_message_fields(message_id, fields, conn=None):
+    """Generic partial update on a message row."""
+    if not fields:
+        return
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        set_clause = ', '.join(f'{k} = ?' for k in fields)
+        conn.execute(
+            f'UPDATE messages SET {set_clause} WHERE id = ?',
+            list(fields.values()) + [message_id],
+        )
+        if owns_conn:
+            conn.commit()
     finally:
         if owns_conn:
             conn.close()
@@ -213,6 +311,26 @@ def update_message_status(message_id, status, error_detail=None, conn=None):
             """UPDATE messages SET status = ?, error_detail = ?, processed_at = ?
                WHERE id = ?""",
             (status, error_detail, _now(), message_id),
+        )
+        if owns_conn:
+            conn.commit()
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def set_message_file_path(message_id, message_file_path, conn=None):
+    """Record where the original email was exported to (see
+    outlook_ingest.save_message_file). Separate from insert_message() because
+    insert is INSERT OR IGNORE -- a message ingested before this column
+    existed, or before the export succeeded, is backfilled here on a later run.
+    """
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        conn.execute(
+            'UPDATE messages SET message_file_path = ? WHERE id = ?',
+            (message_file_path, message_id),
         )
         if owns_conn:
             conn.commit()
@@ -322,6 +440,42 @@ def find_duplicate_lead(dedup_key, exclude_lead_id=None, conn=None):
             params.append(exclude_lead_id)
         query += ' ORDER BY created_at DESC LIMIT 1'
         row = conn.execute(query, params).fetchone()
+        return dict(row) if row else None
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def find_submitted_duplicate(lead_id, conn=None):
+    """
+    Another lead, already submitted to Oracle, that looks like the same person
+    at the same company as this one (same dedup_key). Returns None if there
+    isn't one.
+
+    This is the dedup guard that actually holds. Oracle's own pre-submission
+    check queries the leads collection as the API user, and that query only
+    returns leads visible to them -- confirmed against this tenant on
+    2026-07-30, where leads this pipeline had just created were absent from
+    every query (by LeadNumber, by Name, by LIKE) while older leads with an
+    assigned owner came back fine. A lead we submitted minutes ago is exactly
+    the one most likely to be duplicated, and it is exactly the one Oracle
+    will not show us, so the local record has to be the primary source of
+    truth about what we already sent.
+    """
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        lead = get_lead(lead_id, conn=conn)
+        if not lead or not lead.get('dedup_key'):
+            return None
+        row = conn.execute(
+            """SELECT * FROM leads
+               WHERE dedup_key = ? AND id != ?
+                 AND status = 'submitted'
+                 AND oracle_record_id IS NOT NULL AND oracle_record_id != ''
+               ORDER BY submitted_at DESC, id DESC LIMIT 1""",
+            (lead['dedup_key'], lead_id),
+        ).fetchone()
         return dict(row) if row else None
     finally:
         if owns_conn:
@@ -468,6 +622,66 @@ def list_leads_by_message(message_id, conn=None):
             conn.close()
 
 
+def consolidate_ingest_batch_threads(ingest_batch_id, conn=None):
+    """Keep one pending dashboard lead per Outlook thread in one ingest run.
+
+    Every source message remains stored. Only lead rows for older messages in
+    the same conversation and batch are removed; the newest message's lead(s)
+    remain. A later batch is intentionally independent and can reintroduce the
+    conversation to Pending Review.
+    """
+    if not ingest_batch_id:
+        return 0
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        conversations = conn.execute(
+            """SELECT m.conversation_id
+               FROM messages m JOIN leads l ON l.message_id = m.id
+               WHERE m.ingest_batch_id = ? AND m.conversation_id IS NOT NULL
+               GROUP BY m.conversation_id
+               HAVING COUNT(DISTINCT m.id) > 1""",
+            (ingest_batch_id,),
+        ).fetchall()
+        removed = 0
+        for row in conversations:
+            messages = conn.execute(
+                """SELECT DISTINCT m.id, m.received_at, m.created_at
+                   FROM messages m JOIN leads l ON l.message_id = m.id
+                   WHERE m.ingest_batch_id = ? AND m.conversation_id = ?
+                   ORDER BY COALESCE(m.received_at, m.created_at) DESC, m.id DESC""",
+                (ingest_batch_id, row['conversation_id']),
+            ).fetchall()
+            older_ids = [m['id'] for m in messages[1:]]
+            if not older_ids:
+                continue
+            placeholders = ', '.join('?' for _ in older_ids)
+            lead_rows = conn.execute(
+                f'SELECT id FROM leads WHERE message_id IN ({placeholders})', older_ids,
+            ).fetchall()
+            lead_ids = [lead['id'] for lead in lead_rows]
+            if lead_ids:
+                lead_placeholders = ', '.join('?' for _ in lead_ids)
+                conn.execute(
+                    f'UPDATE leads SET duplicate_of_lead_id = NULL '
+                    f'WHERE duplicate_of_lead_id IN ({lead_placeholders})',
+                    lead_ids,
+                )
+            cur = conn.execute(
+                f"""DELETE FROM leads
+                    WHERE message_id IN ({placeholders})
+                      AND status IN ('ingested', 'extracted', 'screened', 'pending_review')""",
+                older_ids,
+            )
+            removed += cur.rowcount
+        if owns_conn:
+            conn.commit()
+        return removed
+    finally:
+        if owns_conn:
+            conn.close()
+
+
 def update_lead_fields(lead_id, fields, conn=None):
     """Generic partial update — fields is a dict of column: value."""
     if not fields:
@@ -580,32 +794,113 @@ def restore_lead_to_review(lead_id, conn=None):
 
 
 def get_lead_email_attachment(lead_id, conn=None):
-    """Retrieve or generate the cached email .txt attachment file for a lead."""
+    """
+    Return the path of the file representing this lead's source email, for
+    upload into the Oracle lead's Attachments section. Returns None only if
+    the lead itself doesn't exist.
+
+    Three tiers, best first:
+      1. The exported .msg saved at ingest (outlook_ingest.save_message_file)
+         -- the real email: formatting, headers, thread, sender's own files.
+      2. The cached body .txt written by pipeline_ingest._cache_body(), for
+         leads ingested before .msg export existed or when Outlook couldn't
+         export the item.
+      3. A .txt reconstructed from the lead's own stored fields, so a lead
+         still reaches Oracle with *some* provenance attached even when both
+         cached files are gone.
+    """
     lead = get_lead(lead_id, conn=conn)
     if not lead:
         return None
+
     msg_id = lead.get('message_id')
     if msg_id:
-        msg = get_message(msg_id, conn=conn)
-        if msg and msg.get('body_cache_path'):
-            cache_path = Path(msg['body_cache_path'])
-            if cache_path.exists():
-                return str(cache_path)
+        msg = get_message(msg_id, conn=conn) or {}
+        for key in ('message_file_path', 'body_cache_path'):
+            candidate = msg.get(key)
+            if candidate and Path(candidate).exists():
+                return str(candidate)
 
-    # Fallback: Generate structured .txt file on the fly from lead details
-    cache_dir = Path('body_cache')
-    cache_dir.mkdir(exist_ok=True)
-    file_path = cache_dir / f"email_lead_{lead_id}.txt"
+    # Tier 3. EMAIL_CACHE_DIR is anchored to the project directory, not the
+    # process's working directory -- a Task Scheduler run starts in
+    # C:\Windows\System32, where a relative path would either fail outright or
+    # scatter lead PII outside the project.
+    fallback_dir = Path(EMAIL_CACHE_DIR)
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    file_path = fallback_dir / f'lead_{lead_id}_reconstructed.txt'
     content = (
-        f"From: {lead.get('first_name', '')} {lead.get('last_name', '')} <{lead.get('email', '')}>\n"
-        f"Company: {lead.get('organization', '')}\n"
-        f"Phone: {lead.get('phone', '')}\n"
-        f"Date: {lead.get('created_at', '')}\n"
-        f"{'='*60}\n\n"
-        f"{lead.get('lead_details') or ''}"
+        f"From: {lead.get('first_name') or ''} {lead.get('last_name') or ''} "
+        f"<{lead.get('email') or ''}>\n"
+        f"Company: {lead.get('organization') or ''}\n"
+        f"Phone: {lead.get('phone') or ''}\n"
+        f"Date: {lead.get('created_at') or ''}\n"
+        f"{'=' * 60}\n\n"
+        f"{lead.get('lead_details') or lead.get('notes_body') or ''}"
     )
     file_path.write_text(content, encoding='utf-8')
     return str(file_path)
+
+
+# Statuses where the lead did not land in Oracle the way the operator expected
+# when they approved it.
+ALERT_STATUSES = ('failed', 'submission_unknown', 'duplicate')
+
+
+def list_submission_alerts(conn=None):
+    """
+    Leads whose submission needs a human to look at it, newest first.
+
+    Two kinds, and the first is the one that is otherwise invisible:
+
+      - A lead reported as 'submitted' that Oracle's pre-submission dedup check
+        matched to an existing lead, so no new lead was created. Recorded only
+        as a field_warnings entry, which nothing on the dashboard used to show.
+      - A lead that outright failed, or whose outcome is unknown.
+
+    Anything the operator has dismissed is excluded.
+    """
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        placeholders = ', '.join('?' for _ in ALERT_STATUSES)
+        rows = conn.execute(
+            f"""SELECT * FROM leads
+                WHERE alert_dismissed_at IS NULL
+                  AND (status IN ({placeholders})
+                       OR (field_warnings IS NOT NULL AND field_warnings != ''))
+                ORDER BY COALESCE(submitted_at, updated_at) DESC, id DESC""",
+            ALERT_STATUSES,
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def dismiss_lead_alert(lead_id, conn=None):
+    update_lead_fields(lead_id, {'alert_dismissed_at': _now()}, conn=conn)
+
+
+def dismiss_all_lead_alerts(conn=None):
+    """Dismiss every currently-open alert. Returns how many were cleared."""
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        placeholders = ', '.join('?' for _ in ALERT_STATUSES)
+        now = _now()
+        cur = conn.execute(
+            f"""UPDATE leads SET alert_dismissed_at = ?, updated_at = ?
+                WHERE alert_dismissed_at IS NULL
+                  AND (status IN ({placeholders})
+                       OR (field_warnings IS NOT NULL AND field_warnings != ''))""",
+            (now, now, *ALERT_STATUSES),
+        )
+        if owns_conn:
+            conn.commit()
+        return cur.rowcount
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 def mark_lead_submitted(lead_id, oracle_project_name, oracle_record_id=None,
@@ -624,7 +919,36 @@ def mark_lead_submitted(lead_id, oracle_project_name, oracle_record_id=None,
             if not isinstance(field_warnings, str)
             else field_warnings
         )
+        # New warnings are a new event -- re-raise the alert even if an older
+        # one on this lead was already dismissed.
+        fields['alert_dismissed_at'] = None
     update_lead_fields(lead_id, fields, conn=conn)
+
+
+def mark_lead_duplicate_of_submitted(lead_id, prior_lead, detail, conn=None):
+    """
+    Park a lead that was never sent to Oracle because an equivalent one already
+    was. Deliberately NOT 'submitted': nothing new was created, and recording
+    it as submitted is what made the previous duplicate invisible.
+
+    oracle_record_id points at the record that already exists, so the operator
+    can open the real lead from here.
+    """
+    update_lead_fields(
+        lead_id,
+        {
+            'status': 'duplicate',
+            'duplicate_of_lead_id': prior_lead['id'],
+            'oracle_record_id': prior_lead.get('oracle_record_id'),
+            'oracle_project_name': prior_lead.get('oracle_project_name'),
+            'field_warnings': json.dumps([detail]),
+            'submitting_started_at': None,
+            'next_attempt_at': None,
+            'submit_error': None,
+            'alert_dismissed_at': None,
+        },
+        conn=conn,
+    )
 
 
 def mark_lead_failed(lead_id, submit_error, submit_screenshot_path=None, conn=None):
@@ -634,6 +958,7 @@ def mark_lead_failed(lead_id, submit_error, submit_screenshot_path=None, conn=No
             'status': 'failed', 'submit_error': submit_error,
             'submit_screenshot_path': submit_screenshot_path,
             'submitting_started_at': None,
+            'alert_dismissed_at': None,
         },
         conn=conn,
     )
@@ -695,6 +1020,7 @@ def mark_submission_unknown(lead_id, detail, screenshot_path=None,
             'submit_screenshot_path': screenshot_path,
             'submitting_started_at': None,
             'oracle_project_name': oracle_project_name,
+            'alert_dismissed_at': None,
         },
         conn=conn,
     )
@@ -732,19 +1058,29 @@ def get_lead_email_thread(lead_id, conn=None):
         # that column. dedup_key (same email/name/organization, set on every
         # insert_lead call) is what actually ties a reply back to the
         # original inquiry, so use that to pull the whole conversation.
-        rows = conn.execute("""
-            SELECT DISTINCT m.* FROM messages m
-            JOIN leads l ON l.message_id = m.id
-            WHERE l.id = ? OR (l.dedup_key = ? AND l.dedup_key IS NOT NULL)
-            ORDER BY m.received_at ASC, m.id ASC
-        """, (lead_id, lead.get('dedup_key'))).fetchall()
+        source_message = get_message(lead.get('message_id'), conn=conn)
+        if source_message and source_message.get('conversation_id'):
+            rows = conn.execute(
+                """SELECT * FROM messages
+                   WHERE conversation_id = ?
+                   ORDER BY received_at ASC, id ASC""",
+                (source_message['conversation_id'],),
+            ).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT DISTINCT m.* FROM messages m
+                JOIN leads l ON l.message_id = m.id
+                WHERE l.id = ? OR (l.dedup_key = ? AND l.dedup_key IS NOT NULL)
+                ORDER BY m.received_at ASC, m.id ASC
+            """, (lead_id, lead.get('dedup_key'))).fetchall()
 
         thread = []
         for idx, r in enumerate(rows):
             body = ""
-            if r['body_cache_path'] and Path(r['body_cache_path']).exists():
+            display_cache_path = r['translated_body_cache_path'] or r['body_cache_path']
+            if display_cache_path and Path(display_cache_path).exists():
                 try:
-                    raw_body = Path(r['body_cache_path']).read_text(encoding='utf-8', errors='replace')
+                    raw_body = Path(display_cache_path).read_text(encoding='utf-8', errors='replace')
                     import email_cleaner
                     body = email_cleaner.clean_email_body(raw_body)
                 except Exception:
@@ -765,7 +1101,8 @@ def get_lead_email_thread(lead_id, conn=None):
                 'sender': sender,
                 'sender_email': r['sender_email'] or '',
                 'recipient': recipient,
-                'subject': r['subject'],
+                'subject': r['translated_subject'] or r['subject'],
+                'translated_from': r['original_language'] if r['translated_body_cache_path'] else None,
                 'received_at': r['received_at'],
                 'body_text': body,
             })

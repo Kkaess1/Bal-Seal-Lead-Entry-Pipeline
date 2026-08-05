@@ -179,13 +179,47 @@
     tr:last-child td { border-bottom: none; }
 
     label { display: block; font-size: 0.78rem; font-weight: 600; color: var(--text-muted); margin: 0.7rem 0 0.3rem; text-transform: uppercase; letter-spacing: 0.02em; }
-    input[type=text], textarea {
+    input[type=text], input[type=email], textarea {
       width: 100%; box-sizing: border-box; padding: 0.5rem 0.65rem; border: 1px solid var(--border);
       border-radius: var(--radius-sm); font-size: 0.9rem; font-family: inherit;
       background: var(--surface); color: var(--text);
     }
-    input[type=text]:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    input[type=text]:focus, input[type=email]:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
     textarea { min-height: 5rem; line-height: 1.55; resize: vertical; }
+
+    /* --- Forward original email --- */
+    .lead-detail-card { position: relative; padding-bottom: 4.5rem; }
+    .lead-forward-card { position: relative; padding-bottom: 4.5rem; }
+    .forward-fab {
+      position: absolute; right: 1.25rem; bottom: 1.1rem; width: 42px; height: 42px;
+      padding: 0; justify-content: center; border-radius: 50%;
+      background: var(--navy); color: #fff; box-shadow: 0 4px 12px rgba(26,38,43,0.2);
+    }
+    .forward-fab svg { width: 21px; height: 21px; }
+    .forward-dialog {
+      width: min(440px, calc(100vw - 2rem)); padding: 0; color: var(--text);
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: 0 14px 40px rgba(26,38,43,0.28);
+    }
+    .forward-dialog::backdrop { background: rgba(18,25,29,0.55); }
+    .forward-dialog form { padding: 1.2rem 1.3rem; }
+    .forward-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    .forward-dialog-head h3 { margin: 0; }
+    .forward-dialog-close {
+      padding: 0; border: 0; background: transparent; color: var(--text-muted);
+      font-size: 1.6rem; line-height: 1;
+    }
+    .forward-dialog textarea { min-height: 7rem; }
+    .label-optional { text-transform: none; font-weight: 400; }
+    .forward-dialog-actions { justify-content: flex-end; margin-top: 1.2rem; }
+    .forward-notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); margin: 1rem 0; font-weight: 600; }
+    .forward-notice-success { background: var(--clear-bg); color: var(--clear-fg); border: 1px solid var(--clear-border); }
+    .forward-notice-error { background: var(--reject-bg); color: var(--reject-fg); border: 1px solid var(--reject-border); }
+    .translation-notice {
+      display: inline-block; margin: 0 0 0.55rem; padding: 0.25rem 0.55rem;
+      border: 1px solid #93c5fd; border-radius: var(--radius-sm);
+      background: #eff6ff; color: #1e40af; font-size: 0.76rem; font-weight: 700;
+    }
 
     table.kv-table { width: auto; min-width: 60%; border-collapse: collapse; }
     table.kv-table td { padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--border); font-size: 0.85rem; vertical-align: top; }
@@ -197,6 +231,55 @@
     table.lead-table tr.row-risk-review td:first-child { box-shadow: inset 3px 0 0 var(--review-fg); }
     table.lead-table tr.row-risk-reject td:first-child { box-shadow: inset 3px 0 0 var(--reject-fg); }
     table.lead-table td.details-cell { white-space: pre-line; line-height: 1.6; }
+
+    /* --- Submission notifications (bell) --- */
+    .bell-wrap { position: relative; display: flex; align-items: center; }
+    .bell-btn {
+      background: none; border: none; cursor: pointer; padding: 0.3rem; line-height: 0;
+      color: var(--text-muted); border-radius: var(--radius-sm); position: relative;
+    }
+    .bell-btn:hover { color: #28495a; background: var(--surface-2); }
+    .bell-btn svg { width: 22px; height: 22px; display: block; }
+    .bell-badge {
+      position: absolute; top: -2px; right: -4px; min-width: 17px; height: 17px;
+      padding: 0 4px; box-sizing: border-box; border-radius: var(--radius-pill);
+      background: var(--reject-fg); color: #fff; font-size: 0.68rem; font-weight: 700;
+      line-height: 17px; text-align: center;
+    }
+    .bell-badge.is-warning { background: var(--review-fg); }
+    .bell-panel {
+      position: absolute; top: calc(100% + 10px); right: 0; width: 380px; max-width: 90vw;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: 0 8px 24px rgba(26,38,43,0.16); z-index: 100; overflow: hidden;
+    }
+    .bell-panel[hidden] { display: none; }
+    .bell-panel-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.7rem 0.9rem; background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+    }
+    .bell-panel h4 { margin: 0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+    .bell-list { max-height: 60vh; overflow-y: auto; }
+    .bell-item { display: flex; gap: 0.6rem; padding: 0.75rem 0.9rem; border-bottom: 1px solid var(--border); }
+    .bell-item:last-child { border-bottom: none; }
+    .bell-item .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 0.4rem; flex: none; }
+    .bell-item.sev-blocked .dot { background: var(--reject-fg); }
+    .bell-item.sev-warning .dot { background: var(--review-fg); }
+    .bell-item .body { flex: 1; min-width: 0; }
+    .bell-item .headline { font-weight: 700; font-size: 0.83rem; color: var(--text); }
+    .bell-item.sev-blocked .headline { color: var(--reject-fg); }
+    .bell-item .who { font-size: 0.85rem; margin: 0.1rem 0; }
+    .bell-item .who a { color: var(--accent); text-decoration: none; font-weight: 600; }
+    .bell-item .who a:hover { text-decoration: underline; }
+    .bell-item .detail { font-size: 0.78rem; color: var(--text-muted); line-height: 1.45; word-wrap: break-word; }
+    .bell-dismiss {
+      background: none; border: none; cursor: pointer; color: var(--text-faint);
+      font-size: 1.1rem; line-height: 1; padding: 0 0.2rem; flex: none;
+    }
+    .bell-dismiss:hover { color: var(--text); }
+    .bell-empty { padding: 1.4rem 0.9rem; text-align: center; color: var(--text-muted); font-size: 0.85rem; }
+    .bell-clear { background: none; border: none; cursor: pointer; color: var(--accent); font-size: 0.78rem; font-weight: 600; padding: 0; }
+    .bell-clear:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -210,6 +293,53 @@
       <a href="{{ url_for('queue') }}" class="{{ 'active' if request.endpoint == 'queue' }}">Input Queue{% if staged_count or ready_count %} <span style="background:var(--accent); color:#fff; border-radius:10px; padding:2px 7px; font-size:0.75rem; margin-left:2px;">{{ staged_count + ready_count }}</span>{% endif %}</a>
       <a href="{{ url_for('history') }}" class="{{ 'active' if request.endpoint == 'history' }}">History</a>
       <a href="{{ url_for('status') }}" class="{{ 'active' if request.endpoint == 'status' }}">Status</a>
+
+      <div class="bell-wrap">
+        <button type="button" class="bell-btn" id="bell-btn" aria-haspopup="true"
+                aria-expanded="false" aria-controls="bell-panel"
+                title="{{ alert_count }} submission notification{{ '' if alert_count == 1 else 's' }}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+          </svg>
+          {% if alert_count %}
+            <span class="bell-badge {{ '' if blocked_count else 'is-warning' }}">{{ alert_count }}</span>
+          {% endif %}
+          <span class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);">Notifications</span>
+        </button>
+
+        <div class="bell-panel" id="bell-panel" hidden>
+          <div class="bell-panel-head">
+            <h4>Submission notifications</h4>
+            {% if alerts %}
+              <form method="post" action="{{ url_for('dismiss_all_alerts') }}" style="margin:0;">
+                <button type="submit" class="bell-clear">Clear all</button>
+              </form>
+            {% endif %}
+          </div>
+          <div class="bell-list">
+            {% for alert in alerts %}
+              <div class="bell-item sev-{{ alert.severity }}">
+                <span class="dot"></span>
+                <div class="body">
+                  <div class="headline">{{ alert.headline }}</div>
+                  <div class="who">
+                    <a href="{{ url_for('lead_detail', lead_id=alert.lead_id) }}">{{ alert.name }}</a>
+                    {%- if alert.organization %} &mdash; {{ alert.organization }}{% endif %}
+                  </div>
+                  <div class="detail">{{ alert.detail }}</div>
+                </div>
+                <form method="post" action="{{ url_for('dismiss_alert', lead_id=alert.lead_id) }}" style="margin:0;">
+                  <button type="submit" class="bell-dismiss" title="Dismiss">&times;</button>
+                </form>
+              </div>
+            {% else %}
+              <div class="bell-empty">Nothing needs your attention.</div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
     </nav>
   </header>
   <main>
@@ -228,6 +358,26 @@
     }
 
     document.addEventListener('DOMContentLoaded', function() {
+      var bellBtn = document.getElementById('bell-btn');
+      var bellPanel = document.getElementById('bell-panel');
+      if (bellBtn && bellPanel) {
+        var setOpen = function(open) {
+          bellPanel.hidden = !open;
+          bellBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        };
+        bellBtn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          setOpen(bellPanel.hidden);
+        });
+        // Clicking inside the panel must not close it -- the dismiss buttons
+        // are forms that need their submit to land.
+        bellPanel.addEventListener('click', function(e) { e.stopPropagation(); });
+        document.addEventListener('click', function() { setOpen(false); });
+        document.addEventListener('keydown', function(e) {
+          if (e.key === 'Escape') { setOpen(false); }
+        });
+      }
+
       var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
       document.querySelectorAll('form[method="post"], form[method="POST"]').forEach(function(form) {
         if (!form.querySelector('input[name="_csrf_token"]')) {

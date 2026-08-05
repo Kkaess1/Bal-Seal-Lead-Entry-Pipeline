@@ -10,16 +10,39 @@ Used by both dashboard/app.py (human approve/reject) and pipeline_ingest.py
 decided yet" check only lives in one place.
 """
 
+import json
 import logging
+from pathlib import Path
 
 import db
 import outlook_ingest
 
 logger = logging.getLogger(__name__)
 
+CONFIG_PATH = Path(__file__).parent / 'config.json'
+
 # Statuses that mean "a decision has been made" -- reachable only after an
 # approve/reject (human or automatic), not the earlier pipeline stages.
 REVIEWED_STATUSES = {'approved', 'rejected', 'submitted', 'failed'}
+
+
+def marking_enabled():
+    """
+    Whether to write the green category back to Outlook at all
+    (config.json -> outlook.mark_reviewed, default on).
+
+    Turned off while the pipeline is being evaluated, so a test run never
+    alters the real Sales mailbox. Note the side effect: the green tag is also
+    what stops an email being ingested again, so with marking off, approved
+    emails keep coming back into the review queue on every ingest. The
+    submission-time duplicate guard is what stops those reaching Oracle.
+    """
+    try:
+        with open(CONFIG_PATH, encoding='utf-8') as f:
+            config = json.load(f)
+    except (OSError, ValueError):
+        return True
+    return bool(config.get('outlook', {}).get('mark_reviewed', True))
 
 
 def maybe_mark_email_reviewed(lead_id):
@@ -29,7 +52,16 @@ def maybe_mark_email_reviewed(lead_id):
     from a single email -- tag that email green in Outlook. Purely cosmetic:
     never raises, so a hiccup here can't break the caller's actual
     approve/reject/ingest action.
+
+    No-op when outlook.mark_reviewed is off -- see marking_enabled().
     """
+    if not marking_enabled():
+        logger.info(
+            'Outlook green-tagging is off (outlook.mark_reviewed=false in '
+            'config.json); leaving lead %s\'s source email untagged.', lead_id,
+        )
+        return
+
     lead = db.get_lead(lead_id)
     if not lead or not lead.get('message_id'):
         return

@@ -1,20 +1,23 @@
 """
-Best-effort cleanup of a plain-text email body for DISPLAY only.
+Best-effort cleanup of a plain-text email body.
 
 Strips the clutter that isn't the actual message -- external-sender security
 banners, tracking/embedded-image URLs, legal disclaimers, and quoted reply
-history -- so the dashboard's "view original email" shows what a person
-would actually read (body paragraph + signature), not the full raw dump.
+history -- so what a rep reads (on the dashboard, and in the lead Description
+that reaches Oracle) is what a person would actually read: the body paragraph
+and signature, not the full raw dump.
 
-This never touches the underlying stored lead_details, which stays verbatim
-on purpose (see lead_extractor.py's docstring) -- it's what a sales rep sees
-and what gets submitted to Oracle, and shouldn't be lossy. This module only
-changes what the dashboard *renders*.
+Website form submissions get a second, sharper pass: they arrive as a
+tab-separated label/value table whose contact half -- name, company, email,
+phone, address -- is *already* parsed into its own Oracle fields, so
+repeating it in the Description just buries the engineering question the rep
+opened the lead to read. extract_form_submission() keeps only the answers
+that aren't stored anywhere else. See the block comment above it.
 
 Patterns below were derived from real cached email bodies in email_cache/
 (a natural prose inquiry with a signature block and a company disclaimer,
-and a website contact-form submission full of SafeLinks/SendGrid tracking
-URLs and an image-checkbox reference) -- see the __main__ block for both.
+and website form submissions from both vendors, full of SafeLinks/SendGrid
+tracking URLs and image-checkbox references) -- see the __main__ block.
 """
 
 import re
@@ -76,11 +79,219 @@ _DISCLAIMER_KEYWORDS = (
 _DISCLAIMER_MIN_LEN = 120
 
 
+# ---------------------------------------------------------------------------
+# Website form submissions
+#
+# The two form vendors that feed the Sales inbox (Jotform, and Gravity Forms
+# via leads@bse-web.com) both render as a tab-separated label/value table. The
+# contact half of that table -- name, company, email, phone, address -- is
+# already parsed into its own Oracle fields, so repeating it in the lead
+# Description is noise a rep has to read past to reach the actual question.
+# What's below keeps only the answers that aren't captured elsewhere: the
+# product/solution selections and the free-text application description.
+#
+# Layout differs between the two vendors (Jotform puts label and value on one
+# line; Gravity puts the label on its own line and the value, tab-indented, on
+# the next -- and a long free-text answer then runs on for many untabbed
+# lines), so the parser below keys off tab structure rather than line shape.
+# ---------------------------------------------------------------------------
+
+# Labels whose answers Oracle already stores as structured fields, plus the
+# form's own bookkeeping rows. Matched against a normalized label (lowercased,
+# trailing '*'/':'/'.' and a leading "your " stripped).
+_FORM_CONTACT_LABELS = {
+    'name', 'first name', 'last name', 'full name', 'contact name',
+    'company', 'company name', 'organization', 'organisation', 'employer',
+    'email', 'email address', 'e-mail', 'e-mail address',
+    'phone', 'phone number', 'telephone', 'mobile', 'mobile number', 'cell',
+    'address', 'street', 'street address', 'mailing address', 'city', 'state',
+    'state/province', 'state/area', 'province', 'zip', 'zip code',
+    'postal code', 'country', 'title', 'job title', 'consent', 'map it',
+    # Image column in the CAD portal's part table -- the cell holds a logo,
+    # never text worth reading.
+    'logo',
+}
+
+# Qualified variants of the fields above ("international phone (if
+# applicable)", "shipping address", "work email"). Only endings specific
+# enough that no product question ends the same way -- notably NOT "name",
+# which would swallow "part name" / "project name".
+_CONTACT_LABEL_SUFFIXES = (
+    'phone', 'phone number', 'email', 'email address', 'e-mail',
+    'address', 'fax', 'fax number', 'mobile', 'mobile number',
+)
+_CONTACT_LABEL_SUFFIX_MAX_LEN = 40
+
+# Boilerplate that rides along inside answer cells -- the consent checkbox
+# caption and the vendor's "manage your submission" footer.
+_FORM_NOISE_RE = re.compile(
+    r'^(?:i agree to the privacy policy\.?'
+    r'|map it'
+    r'|browse\.\.\.'          # caption of the file-upload button; the
+                              # attached filename on the next line is real
+    r'|you can edit this submission.*'
+    r'|.*view all your submissions.*)$',
+    re.IGNORECASE
+)
+
+# A short line ending in a colon and followed by nothing is a section heading
+# whose rows were all contact fields (the CAD portal's "User information:"),
+# left dangling once those were dropped. Only ever trimmed from the *end* of
+# an answer -- mid-answer, a line like "Please include the following:" is
+# introducing content that's still there.
+_DANGLING_HEADING_MAX_LEN = 40
+
+# Verbose prompts these forms use as field labels. Left of each pair is a
+# substring match on the label; right is what a rep should see instead --
+# None meaning "this is the free-text body, print the answer with no label at
+# all". An unmatched label is kept verbatim if it's short enough to read as a
+# field name, and dropped (answer printed bare) past _FORM_LABEL_MAX_LEN.
+_FORM_LABEL_REWRITES = (
+    ('application or engineering challenge', None),
+    ('product type', 'Product type'),
+    ('choose your solution', 'Solution'),
+    ('kind of service', 'Service'),
+)
+_FORM_LABEL_MAX_LEN = 60
+
+_FORM_LABEL_TRIM_RE = re.compile(r'^(?:your\s+)?(.*?)[\s*:.]*$', re.IGNORECASE | re.DOTALL)
+_FORM_LABEL_PAREN_RE = re.compile(r'\s*\([^)]*\)\s*$')
+
+
+def _normalize_form_label(label):
+    label = _FORM_LABEL_PAREN_RE.sub('', label.strip())
+    m = _FORM_LABEL_TRIM_RE.match(label)
+    return (m.group(1) if m else label).strip().lower()
+
+
+def _is_contact_label(label):
+    """True when this field's answer is already stored as its own Oracle
+    field (or is form bookkeeping), so repeating it in the Description is
+    just noise."""
+    norm = _normalize_form_label(label)
+    if norm in _FORM_CONTACT_LABELS or norm.split('/')[0].strip() in _FORM_CONTACT_LABELS:
+        return True
+    return (
+        len(norm) <= _CONTACT_LABEL_SUFFIX_MAX_LEN
+        and norm.endswith(_CONTACT_LABEL_SUFFIXES)
+    )
+
+
+def _parse_form_pairs(text):
+    """Splits a tab-delimited form-submission body into [label, value_lines]
+    pairs. Untabbed lines continue the answer above them, which is what keeps
+    a multi-paragraph free-text answer intact."""
+    pairs = []
+    for raw_line in text.split('\n'):
+        # Only \r is stripped, never trailing tabs -- a label alone on its
+        # line still ends in the tab that marks it as a table cell, and
+        # rstrip()ing that away makes it indistinguishable from body text.
+        line = raw_line.rstrip('\r')
+        if '\t' not in line:
+            if pairs:
+                pairs[-1][1].append(line)
+            continue
+        cells = [cell.strip() for cell in line.split('\t')]
+        filled = [cell for cell in cells if cell]
+        if len(filled) >= 2:
+            pairs.append([filled[0], [' '.join(filled[1:])]])
+        elif len(filled) == 1:
+            if cells[0]:
+                # Label alone on its line; the answer follows below it.
+                pairs.append([filled[0], []])
+            elif pairs:
+                pairs[-1][1].append(filled[0])
+        elif pairs:
+            pairs[-1][1].append('')
+    return pairs
+
+
+def _merge_unanswered_pairs(pairs):
+    """A "label" with no answer under it is usually not a label at all -- it's
+    the last line of a long free-text answer that happened to end in a tab (a
+    signature's street address, say). Fold those back into the answer above.
+    A genuinely blank contact field is just dropped."""
+    merged = []
+    for label, value_lines in pairs:
+        if any(line.strip() for line in value_lines):
+            merged.append([label, value_lines])
+        elif _is_contact_label(label):
+            continue
+        elif merged:
+            merged[-1][1].append(label)
+        else:
+            merged.append([label, value_lines])
+    return merged
+
+
+def _is_url_only(label):
+    """The header banner of these emails is a bare logo link, which parses as
+    a label whose "answer" is the form's own title -- both already known from
+    the email subject."""
+    return bool(_STANDALONE_URL_RE.match(label.strip()))
+
+
+def _rewrite_form_label(label):
+    """Returns the label to print, or None to print the answer unlabeled."""
+    lowered = label.lower()
+    for needle, replacement in _FORM_LABEL_REWRITES:
+        if needle in lowered:
+            return replacement
+    if len(label) > _FORM_LABEL_MAX_LEN:
+        return None
+    return label.rstrip(' *:.')
+
+
+def extract_form_submission(text):
+    """
+    Reduces a website form-submission email to the answers a rep actually
+    needs -- dropping the contact fields Oracle already stores separately and
+    the form's own footer.
+
+    Returns None when `text` doesn't look like one of these submissions, so
+    callers can fall back to normal body cleanup. Detection deliberately
+    requires several recognized contact labels: a prose email that happens to
+    contain tabs must not get run through this.
+    """
+    if not text or '\t' not in text:
+        return None
+
+    pairs = _merge_unanswered_pairs(_parse_form_pairs(text))
+    contact_rows = sum(1 for label, _ in pairs if _is_contact_label(label))
+    if len(pairs) < 3 or contact_rows < 2:
+        return None
+
+    blocks = []
+    for label, value_lines in pairs:
+        if _is_contact_label(label) or _is_url_only(label):
+            continue
+        kept = [ln for ln in value_lines if not _FORM_NOISE_RE.match(ln.strip())]
+        while kept and (
+            not kept[-1].strip()
+            or (kept[-1].strip().endswith(':')
+                and len(kept[-1].strip()) <= _DANGLING_HEADING_MAX_LEN)
+        ):
+            kept.pop()
+        value = '\n'.join(kept).strip()
+        if not value:
+            continue
+        display_label = _rewrite_form_label(label)
+        blocks.append(f'{display_label}: {value}' if display_label else value)
+
+    return '\n\n'.join(blocks) or None
+
+
 def clean_email_body(text):
     """Returns a cleaned copy of `text` for display. Safe to call on already
     short/clean text -- a no-op in that case."""
     if not text:
         return text
+
+    # Form submissions get reduced to their answers first; the cleanup below
+    # then strips whatever tracking URLs and mailto links survive inside them.
+    form_text = extract_form_submission(text)
+    if form_text:
+        text = form_text
 
     for pattern in (_QUOTE_HEADER_RE, _ON_WROTE_RE, _ORIGINAL_MESSAGE_RE, _AUTOMATED_FOOTER_RE):
         m = pattern.search(text)
@@ -177,5 +388,29 @@ if __name__ == '__main__':
         'I agree to the privacy policy. \t\n'
         ' <https://u5937789.ct.sendgrid.net/wf/open?upn=u001.somethingverylongtrackingpixel>'
     )
-    print('=== Form-submission example, cleaned ===')
+    print('=== Form-submission example (label above value), cleaned ===')
     print(clean_email_body(form_example))
+    print()
+
+    # Same idea, other vendor: label and value share one line.
+    jotform_example = (
+        'CAUTION: This email originated from outside of the organization. Do not click links or '
+        'open attachments unless you recognize the sender and know the content is safe.\n\n\n'
+        ' <https://cdn.jotfor.ms/assets/img/logo2021/jotform-logo.png> \t\n\t\n\t\n'
+        'Design Request Form\n\n\t\n\t\n'
+        '\tPlease choose your solution\t Bal Contact® electrical contact\t \n'
+        "Tell us about your application or engineering challenge, and we'll get to work on it "
+        'right away. The more we know, the faster we can help.\t We would like to understand if '
+        'it is possible to create a good radiofrequency contact in the region 1-4 GHz between to '
+        'waveguides (WR284) upon compression. Do you have experience with RF conductivity? \t\n'
+        'Your name\t Daniele Filippetto\t \n'
+        'Company name\t DC Fusion\t \n'
+        'Your email address\t df@dcfusionllc.com\t \n'
+        'Your phone number\t (510) 219-1011\t \n'
+        'Address\t 660 4th St., Unit #283, San Francisco, California, 94107, United States\t \n\t\n'
+        '\tYou can edit this submission <https://nam12.safelinks.protection.outlook.com/?url='
+        'https%3A%2F%2Fwww.jotform.com%2Fedit%2Fsomethingverylong> and view all your submissions '
+        '<https://nam12.safelinks.protection.outlook.com/?url=somethingelseverylong> easily.\t \t\n'
+    )
+    print('=== Form-submission example (label beside value), cleaned ===')
+    print(clean_email_body(jotform_example))

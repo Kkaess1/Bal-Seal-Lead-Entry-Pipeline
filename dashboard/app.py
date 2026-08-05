@@ -8,11 +8,13 @@ Binds to 127.0.0.1 only -- single-user local tool, not exposed on the network.
 
 import json
 import os
+import re
 import secrets
 import sys
+from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, abort, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / '.env', override=False)
@@ -20,12 +22,14 @@ load_dotenv(Path(__file__).resolve().parent.parent / '.env', override=False)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import db  # noqa: E402
 import email_cleaner  # noqa: E402
+import outlook_ingest  # noqa: E402
 import review_marking  # noqa: E402
 
 app = Flask(__name__)
 app.secret_key = os.getenv('DASHBOARD_SECRET_KEY') or secrets.token_hex(32)
 
 RISK_ORDER = {'reject': 0, 'review': 1, 'clear': 2, None: 1}
+EMAIL_ADDRESS_RE = re.compile(r'^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$')
 
 
 def _parse_reasons(lead):
@@ -72,6 +76,23 @@ def _decorate(lead):
     lead['email_thread'] = db.get_lead_email_thread(lead['id'])
     lead['has_followup'] = len(lead['email_thread']) > 1
 
+    # Only an http(s) URL becomes a clickable link in the template. The field
+    # is editable on the review form, so this decides here rather than trusting
+    # whatever is stored -- a "javascript:" value typed into that box would
+    # otherwise become a live link on the reviewer's own dashboard.
+    # Metadata only, and rendered as inert text -- the files are never stored
+    # or served. A customer's attachment is a stranger's file; describing it is
+    # useful, hosting it would make the dashboard a delivery mechanism for it.
+    lead['attachments'] = db.get_message_attachments(lead.get('message_id'))
+    source_message = db.get_message(lead.get('message_id')) if lead.get('message_id') else None
+    lead['translated_from'] = (
+        source_message.get('original_language')
+        if source_message and source_message.get('translated_body_cache_path') else None
+    )
+
+    website = (lead.get('website') or '').strip()
+    lead['website_url'] = website if website.lower().startswith(('http://', 'https://')) else None
+
     # Extract & format the date the email was received / sent
     raw_date = None
     if lead['email_thread'] and lead['email_thread'][0].get('received_at'):
@@ -95,6 +116,91 @@ def _decorate(lead):
     return lead
 
 
+def _parse_warnings(lead):
+    raw = lead.get('field_warnings')
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return [str(raw)]
+    return parsed if isinstance(parsed, list) else [str(parsed)]
+
+
+def _build_alert(lead):
+    """
+    Turn a lead needing attention into a notification the operator can act on.
+
+    'severity' drives the colour: 'blocked' means nothing new reached Oracle,
+    'warning' means it did but something about it needs checking.
+    """
+    warnings = _parse_warnings(lead)
+    name = (
+        f"{lead.get('first_name') or ''} {lead.get('last_name') or ''}".strip()
+        or lead.get('organization') or f"Lead #{lead['id']}"
+    )
+    status = lead.get('status')
+
+    # Blocked locally: an equivalent lead had already gone to Oracle. Checked
+    # before Oracle is contacted, because Oracle's own dedup cannot see leads
+    # it has not yet assigned an owner to.
+    if status == 'duplicate':
+        return {
+            'lead_id': lead['id'], 'name': name, 'severity': 'blocked',
+            'headline': 'Not submitted — duplicate of an earlier lead',
+            'detail': '; '.join(warnings) or 'An equivalent lead was already sent to Oracle.',
+            'organization': lead.get('organization'),
+        }
+
+    # Oracle's pre-submission dedup matched an existing lead, so nothing new
+    # was created -- the case that used to leave no trace on the dashboard.
+    existing = next((w for w in warnings if 'already exists' in w.lower()), None)
+    if status == 'submitted' and existing:
+        return {
+            'lead_id': lead['id'], 'name': name, 'severity': 'blocked',
+            'headline': 'Not submitted — already in Oracle',
+            'detail': existing,
+            'organization': lead.get('organization'),
+        }
+    if status == 'failed':
+        return {
+            'lead_id': lead['id'], 'name': name, 'severity': 'blocked',
+            'headline': 'Submission failed',
+            'detail': lead.get('submit_error') or 'No error detail recorded.',
+            'organization': lead.get('organization'),
+        }
+    if status == 'submission_unknown':
+        return {
+            'lead_id': lead['id'], 'name': name, 'severity': 'blocked',
+            'headline': 'Outcome unknown — check Oracle',
+            'detail': lead.get('submit_error') or 'No error detail recorded.',
+            'organization': lead.get('organization'),
+        }
+    if warnings:
+        # An ambiguous company match is the one warning that asks the operator
+        # to go and do something in Oracle, so name it rather than burying it
+        # under the generic heading.
+        ambiguous = any('resembles' in w and 'existing Oracle' in w for w in warnings)
+        # A rejected website field is a configuration fault, not a fact about
+        # this lead: it repeats on every lead until oracle.website_field is
+        # fixed. Naming it says what to go and change, instead of leaving the
+        # operator to read the same generic warning off a dozen leads.
+        website_rejected = any('website field' in w.lower() for w in warnings)
+        if ambiguous:
+            headline = 'Possible duplicate account — check Oracle'
+        elif website_rejected:
+            headline = 'Website field rejected — check config.json'
+        else:
+            headline = 'Submitted with warnings'
+        return {
+            'lead_id': lead['id'], 'name': name, 'severity': 'warning',
+            'headline': headline,
+            'detail': '; '.join(warnings),
+            'organization': lead.get('organization'),
+        }
+    return None
+
+
 def _csrf_token():
     token = session.get('_csrf_token')
     if not token:
@@ -116,14 +222,33 @@ def protect_post_requests():
 def inject_counts():
     token = _csrf_token()
     try:
+        alerts = [a for a in (_build_alert(l) for l in db.list_submission_alerts()) if a]
         return {
             'staged_count': db.count_leads('review_approved'),
             'ready_count': db.count_leads('approved'),
             'pending_count': db.count_leads('pending_review'),
+            'alerts': alerts,
+            'alert_count': len(alerts),
+            'blocked_count': sum(1 for a in alerts if a['severity'] == 'blocked'),
             'csrf_token': token,
         }
     except Exception:
-        return dict(staged_count=0, ready_count=0, pending_count=0, csrf_token=token)
+        return dict(staged_count=0, ready_count=0, pending_count=0,
+                    alerts=[], alert_count=0, blocked_count=0, csrf_token=token)
+
+
+@app.route('/alerts/<int:lead_id>/dismiss', methods=['POST'])
+def dismiss_alert(lead_id):
+    if not db.get_lead(lead_id):
+        abort(404)
+    db.dismiss_lead_alert(lead_id)
+    return redirect(request.referrer or url_for('index'))
+
+
+@app.route('/alerts/dismiss_all', methods=['POST'])
+def dismiss_all_alerts():
+    db.dismiss_all_lead_alerts()
+    return redirect(request.referrer or url_for('index'))
 
 
 @app.route('/')
@@ -155,7 +280,10 @@ def queue_approve_all():
         review_marking.maybe_mark_email_reviewed(lead['id'])
     import subprocess
     subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent.parent / 'pipeline_submit.py')])
-    return redirect(url_for('history'))
+    # Stay on the Input Queue rather than jumping to History -- the approved
+    # leads show up in this page's "ready" section while the submit run works
+    # through them, so there's nothing to navigate away for.
+    return redirect(url_for('queue'))
 
 
 @app.route('/queue/<int:lead_id>/unstage', methods=['POST'])
@@ -231,6 +359,63 @@ def reject(lead_id):
     )
     review_marking.maybe_mark_email_reviewed(lead_id)
     return redirect(url_for('index'))
+
+
+@app.route('/leads/<int:lead_id>/forward', methods=['POST'])
+def forward_lead_email(lead_id):
+    """Forward the original Outlook email and dispose of the non-lead."""
+    lead = db.get_lead(lead_id)
+    if not lead or lead['status'] not in ('pending_review', 'review_approved'):
+        abort(409, 'Lead is no longer awaiting review')
+
+    recipient = (request.form.get('recipient') or '').strip()
+    if not EMAIL_ADDRESS_RE.fullmatch(recipient) or '\r' in recipient or '\n' in recipient:
+        flash('Enter one valid email address.', 'forward_error')
+        return redirect(url_for('lead_detail', lead_id=lead_id))
+
+    forward_note = (request.form.get('forward_note') or '').strip()
+    if len(forward_note) > 5000:
+        flash('The forwarding message must be 5,000 characters or fewer.', 'forward_error')
+        return redirect(url_for('lead_detail', lead_id=lead_id))
+
+    message = db.get_message(lead.get('message_id')) if lead.get('message_id') else None
+    if not message or not message.get('source_message_id'):
+        flash('The original Outlook email is not available to forward.', 'forward_error')
+        return redirect(url_for('lead_detail', lead_id=lead_id))
+
+    try:
+        outlook_ingest.forward_message(
+            message['source_message_id'], recipient, note=forward_note or None,
+            fallback_message_path=message.get('message_file_path'),
+        )
+    except ValueError as exc:
+        flash(str(exc), 'forward_error')
+        return redirect(url_for('lead_detail', lead_id=lead_id))
+    except outlook_ingest.OutlookForwardError as exc:
+        app.logger.exception('Could not forward source email for lead %s', lead_id)
+        flash(
+            f'Outlook failed while {exc.stage}. The email was not sent and the '
+            'lead is still pending.',
+            'forward_error',
+        )
+        return redirect(url_for('lead_detail', lead_id=lead_id))
+    except Exception:
+        app.logger.exception('Could not forward source email for lead %s', lead_id)
+        flash(
+            'Outlook could not send the email. Check that Outlook is open and '
+            'signed in, then try again.',
+            'forward_error',
+        )
+        return redirect(url_for('lead_detail', lead_id=lead_id))
+
+    db.reject_lead(
+        lead_id,
+        reviewed_by='dashboard',
+        review_notes=f'Original email forwarded to {recipient}; not processed as a lead.',
+    )
+    review_marking.maybe_mark_email_reviewed(lead_id)
+    flash(f'Email forwarded to {recipient}.', 'forward_success')
+    return redirect(url_for('lead_detail', lead_id=lead_id, forwarded=1))
 
 
 @app.route('/leads/<int:lead_id>/restore', methods=['POST'])

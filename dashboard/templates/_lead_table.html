@@ -3,6 +3,19 @@
   <tr><td>Organization</td><td>{{ lead.organization or '—' }}</td></tr>
   <tr><td>Email</td><td>{{ lead.email or '—' }}</td></tr>
   <tr><td>Phone</td><td>{{ lead.phone or lead.phone_mobile or '—' }}</td></tr>
+  <tr>
+    <td>Website</td>
+    <td>
+      {# Linked only when it is really an http(s) URL. This field is editable
+         on the review form, so a hand-typed value is not guaranteed to be one
+         -- anything else is shown as plain text rather than made clickable. #}
+      {% if lead.website_url %}
+        <a href="{{ lead.website_url }}" target="_blank" rel="noopener noreferrer">{{ lead.website_url }}</a>
+      {% else %}
+        {{ lead.website or '—' }}
+      {% endif %}
+    </td>
+  </tr>
   <tr><td>Location</td><td>{{ lead.location or '—' }}</td></tr>
   <tr><td>Email Date</td><td>{% if lead.received_date_formatted %}<strong>{{ lead.received_date_formatted }}</strong>{% else %}<span class="meta">Unknown</span>{% endif %}</td></tr>
   <tr>
@@ -31,8 +44,32 @@
     </td>
   </tr>
   <tr>
+    <td>Attachments</td>
+    <td>
+      {# Filenames are sender-controlled text. Jinja autoescaping renders them
+         inert, and nothing here links to a file: the attachments themselves
+         are never saved or served. See db.record_attachments. #}
+      {% if lead.attachments %}
+        {% for att in lead.attachments %}
+          <div>
+            {{ att.name }}
+            <span class="meta">&middot; {{ att.kind }}{% if att.size %} &middot; {{ att.size|filesizeformat }}{% endif %}</span>
+          </div>
+        {% endfor %}
+        <div class="meta" style="margin-top:0.25rem;">Open the source email in Outlook to view {{ 'them' if lead.attachments|length > 1 else 'it' }}.</div>
+      {% else %}
+        <span class="meta">None</span>
+      {% endif %}
+    </td>
+  </tr>
+  <tr>
     <td>Details</td>
-    <td class="details-cell" style="word-break: break-word; overflow-wrap: anywhere; max-width: 600px;">{{ lead.details_flat or '—' }}</td>
+    <td class="details-cell" style="word-break: break-word; overflow-wrap: anywhere; max-width: 600px;">
+      {% if lead.translated_from %}
+        <div class="translation-notice">Translated from {{ lead.translated_from }} to English</div>
+      {% endif %}
+      {{ lead.details_flat or '—' }}
+    </td>
   </tr>
 </table>
 
@@ -45,7 +82,7 @@
   
   <details class="thread-dropdown" style="background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;">
     <summary style="padding: 0.6rem 0.8rem; font-weight: 600; font-size: 0.88rem; cursor: pointer; user-select: none; background: var(--surface); color: var(--text);">
-      ▼ View Conversation Thread (Original & Follow-up Emails)
+      View Conversation Thread (Original & Follow-up Emails)
     </summary>
     <div class="thread-body-container" style="padding: 0.75rem; display: flex; flex-direction: column; gap: 0.75rem;">
       {% for msg in lead.email_thread %}
@@ -56,6 +93,7 @@
               <div><strong>From:</strong> {{ msg.sender }}</div>
               <div><strong>To:</strong> {{ msg.recipient }}</div>
             </div>
+            {% if msg.translated_from %}<div class="translation-notice">Translated from {{ msg.translated_from }} to English</div>{% endif %}
             <div class="thread-msg-body" style="white-space: pre-wrap; font-family: inherit; font-size: 0.88rem; color: var(--text); line-height: 1.4;">{{ msg.body_text or '(no body text)' }}</div>
           </div>
         {% else %}
@@ -65,6 +103,7 @@
               <div><strong>From:</strong> {{ msg.sender }}</div>
               <div><strong>To:</strong> {{ msg.recipient }}</div>
             </div>
+            {% if msg.translated_from %}<div class="translation-notice">Translated from {{ msg.translated_from }} to English</div>{% endif %}
             <div class="thread-msg-body" style="white-space: pre-wrap; font-family: inherit; font-size: 0.88rem; color: var(--text); line-height: 1.4;">{{ msg.body_text or '(no body text)' }}</div>
           </div>
         {% endif %}

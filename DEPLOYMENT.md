@@ -55,12 +55,18 @@ Double-click or run the included batch script in PowerShell:
 ```
 This automatically registers the three tasks in **Windows Task Scheduler**.
 
-### Linux Server (Automated Setup)
-Make executable and run:
-```bash
-chmod +x setup_cron.sh
-./setup_cron.sh
-```
+Scheduling is optional. The pipeline also runs entirely on demand: `py
+pipeline_ingest.py` when you want to pull mail, and the dashboard's "Approve
+All & Send to Queue" button launches `pipeline_submit.py` immediately.
+
+Note that the stale-claim recovery in both entry points only runs when that
+entry point runs. Without a schedule, a lead left in `submitting` or a message
+left in `processing` by an interrupted run stays stuck until you next run the
+pipeline by hand.
+
+> Windows only. Ingestion drives the Outlook desktop app through COM
+> (`pywin32`), which has no Linux equivalent — a Linux cron installer used to
+> live here and was removed on 2026-07-31 because it could never work.
 
 ---
 
@@ -82,5 +88,5 @@ The dashboard binds to `http://0.0.0.0:5151` (or your server's IP / internal DNS
 - `pipeline_submit.py` — Oracle Sales Cloud REST API submission & retry engine.
 - `oracle_api.py` — Oracle REST API payload builder & pre-submission deduplication checker.
 - `dashboard/app.py` — Lead review dashboard (Flask app).
-- `setup_scheduler.bat` — Windows Task Scheduler installer.
-- `setup_cron.sh` — Linux Cron installer.
+- `outlook_ingest.py` — Sales inbox reader (Outlook COM); the only source of leads.
+- `setup_scheduler.bat` — Windows Task Scheduler installer (optional).

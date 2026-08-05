@@ -15,13 +15,16 @@ import argparse
 import hashlib
 import logging
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+import company_website
 import db
 import email_cleaner
+import email_translator
 import excel_parser
 import fraud_screen
 import lead_extractor
@@ -37,10 +40,10 @@ LOG_DIR = Path(__file__).parent / 'logs'
 
 def setup_logging():
     """
-    Same pattern as main.py's setup_logging() -- a scheduled Task Scheduler
-    run has no console anyone is watching, so without a file handler here,
-    a 10am/5pm run's output would just vanish. Mirrors main.py rather than
-    reusing it directly to keep each entry point's logging self-contained.
+    A scheduled Task Scheduler run has no console anyone is watching, so
+    without a file handler here a 10am/5pm run's output would just vanish.
+    Duplicated in pipeline_submit.py rather than shared, to keep each entry
+    point's logging self-contained.
     """
     LOG_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -74,6 +77,34 @@ def _cache_body(message_id, body_text, msg_dict=None):
     return str(path)
 
 
+def _export_message_file(msg, existing_row=None):
+    """
+    Export the original email to a .msg file so it can later be attached to
+    the Oracle lead. Done here, at ingest, because this is the moment the
+    message is known to still be sitting in the Sales inbox with Outlook
+    reachable -- pipeline_submit.py runs much later and may have neither.
+
+    Best-effort by design: leads still submit fine with only the cached body
+    text, so a failed export is a warning, never an ingest failure. Retry
+    paths (_message_from_row) don't come from Outlook at all and are skipped.
+    """
+    if existing_row and existing_row.get('message_file_path'):
+        cached = Path(existing_row['message_file_path'])
+        if cached.exists():
+            return str(cached)
+    try:
+        path = outlook_ingest.save_message_file(msg['id'], subject=msg.get('subject'))
+    except Exception as e:
+        logger.warning(f"  Could not export original email to .msg: {e}")
+        return None
+    if not path:
+        logger.warning(
+            f"  Could not export original email {msg.get('subject')!r} to .msg; "
+            'the cached body text will be attached to Oracle instead.'
+        )
+    return path
+
+
 def _screen_and_stage(lead_id, lead, sender_email, subject=None, is_followup=False,
                       followup_reason=None, precomputed_llm_result=None):
     """Territory assignment + fraud screening for a lead that's already been
@@ -92,11 +123,31 @@ def _screen_and_stage(lead_id, lead, sender_email, subject=None, is_followup=Fal
     logger.info(f'  Lead {lead_id}: staged for review (risk={risk_level})')
 
 
+def _fill_website(lead):
+    """Sets lead['website'] from the contact's email domain when nobody gave
+    us one outright, so Oracle's Website field arrives populated. Runs before
+    the insert so the derived value is on the dashboard for review, not a
+    surprise applied at submission time."""
+    website = company_website.derive_website(lead)
+    if website:
+        lead['website'] = website
+    return lead
+
+
+def _fill_market(lead):
+    """Use Oracle's general-purpose market when no specific one was found."""
+    if not (lead.get('market') or '').strip():
+        lead['market'] = 'INDUSTRIAL'
+    return lead
+
+
 def _process_excel_attachment(message_row_id, path, sender_email, subject=None, force=False):
-    """Existing excel_parser.py path -- one lead per spreadsheet row, same as
-    main.py's manual flow already produces."""
+    """Spreadsheet attached to a Sales inbox email -- one lead per row, parsed
+    by excel_parser.py."""
     rows = excel_parser.parse_excel(path)
     for row in rows:
+        _fill_website(row)
+        _fill_market(row)
         ingest_key = (
             f'message:{message_row_id}:excel:{Path(path).name}:'
             f'{row.get("row_number")}'
@@ -118,11 +169,38 @@ def _process_body_text(message_row_id, msg, force=False):
         sender_name=msg['sender_name'], body=msg['body_text'],
     )
 
+    display_body = msg['body_text']
+    source_language = email_translator.normalize_language(
+        extraction.get('source_language')
+    )
+    if email_translator.needs_translation(source_language):
+        try:
+            translated = email_translator.translate_email(
+                msg.get('subject'), msg.get('body_text'), source_language,
+            )
+            display_body = translated['body']
+            translated_cache_path = _cache_body(
+                f"{msg['id']}:english", display_body,
+                msg_dict={**msg, 'subject': translated['subject']},
+            )
+            db.update_message_fields(message_row_id, {
+                'original_language': source_language,
+                'translated_subject': translated['subject'],
+                'translated_body_cache_path': translated_cache_path,
+            })
+            logger.info('  Translated message %s from %s to English.',
+                        msg['id'], source_language)
+        except Exception as exc:
+            logger.warning('  Could not translate message %s from %s: %s',
+                           msg['id'], source_language, exc)
+
     lead = dict(extraction.get('fields') or {})
     if not lead.get('email'):
         lead['email'] = msg['sender_email']
 
-    lead['lead_details'] = email_cleaner.clean_email_body(msg['body_text'])
+    lead['lead_details'] = email_cleaner.clean_email_body(display_body)
+    _fill_website(lead)
+    _fill_market(lead)
     lead_id = db.insert_lead(
         lead, source='email_ai_extract', message_id=message_row_id,
         ingest_key=f'message:{message_row_id}:body', replace_existing=force,
@@ -141,26 +219,69 @@ def _process_body_text(message_row_id, msg, force=False):
     )
 
 
-def process_message(msg, force=False):
-    """Handles one ingestion-backend message dict (see
-    outlook_ingest.fetch_new_messages -- same shape email_ingest.py's Graph
-    path also produces). Idempotent unless force=True."""
+def process_message(msg, force=False, ingest_batch_id=None):
+    """Handles one Sales inbox message dict (see
+    outlook_ingest.fetch_new_messages). Idempotent unless force=True."""
+
+    # -----------------------------------------------------------
+    # Green-category gate: an email tagged green in Outlook has already been
+    # entered, so skip it entirely rather than re-extracting it into a fresh
+    # lead. Green means the category's COLOUR, whatever it is named -- this
+    # mailbox uses "Completed". Read status is irrelevant: merely opening an
+    # email still leaves it to be ingested normally.
+    #
+    # Messages rebuilt from the database for a retry (_message_from_row) have
+    # no category information, so ask Outlook directly rather than letting
+    # them through ungated -- that gap was re-ingesting already-entered mail
+    # on every recovery run.
+    # -----------------------------------------------------------
+    reviewed = msg.get('reviewed_in_outlook')
+    if reviewed is None:
+        reviewed = outlook_ingest.is_reviewed(msg['id'])
+    if reviewed and not force:
+        logger.info(
+            f"  Skipping message {msg['subject']!r} -- already tagged green "
+            f"(entered) in Outlook.  Use --force to re-ingest."
+        )
+        # If a previous run had left this message in new/error, close it out so
+        # retry_pending_messages() stops picking it up (and re-querying Outlook)
+        # on every future run.
+        prior = db.get_message_by_source_id(msg['id'])
+        if prior and prior['status'] in ('new', 'error', 'processing'):
+            db.update_message_status(
+                prior['id'], 'processed',
+                error_detail='Skipped: tagged green (already entered) in Outlook.',
+            )
+        return True
+
     existing = db.get_message_by_source_id(msg['id'])
     body_cache_path = (
         existing.get('body_cache_path') if existing else
         _cache_body(msg['id'], msg['body_text'], msg_dict=msg)
     )
+    message_file_path = _export_message_file(msg, existing)
     message_row_id = db.insert_message(
         source_message_id=msg['id'], received_at=msg['received_at'],
         sender_email=msg['sender_email'], sender_name=msg['sender_name'],
         subject=msg['subject'], has_excel_attachment=msg['has_attachments'],
-        body_cache_path=body_cache_path,
+        body_cache_path=body_cache_path, message_file_path=message_file_path,
+        conversation_id=msg.get('conversation_id'),
+        ingest_batch_id=ingest_batch_id,
     )
-    if message_row_id is None:
+    if message_row_id is not None:
+        db.record_attachments(message_row_id, msg.get('attachments'))
+    else:
         existing = existing or db.get_message_by_source_id(msg['id'])
         if not existing:
             return False
         message_row_id = existing['id']
+        # Backfill for rows inserted before attachments were recorded.
+        if msg.get('attachments') and not existing.get('attachments'):
+            db.record_attachments(message_row_id, msg['attachments'])
+        # Backfill for rows inserted before .msg export existed, or whose
+        # earlier export attempt failed.
+        if message_file_path and not existing.get('message_file_path'):
+            db.set_message_file_path(message_row_id, message_file_path)
         if existing['status'] == 'processed' and not force:
             return True
         if force:
@@ -205,6 +326,7 @@ def _message_from_row(row):
     body = cached.split(marker, 1)[1] if marker in cached else cached
     return {
         'id': row['source_message_id'],
+        'conversation_id': row.get('conversation_id'),
         'received_at': row.get('received_at'),
         'sender_email': row.get('sender_email'),
         'sender_name': row.get('sender_name'),
@@ -217,6 +339,7 @@ def _message_from_row(row):
 def retry_pending_messages():
     """Retry durable work left in new/error by a prior crash or transient error."""
     all_ok = True
+    retry_batch_ids = set()
     for row in db.list_messages(status=['new', 'error']):
         try:
             msg = _message_from_row(row)
@@ -225,7 +348,14 @@ def retry_pending_messages():
             db.update_message_status(row['id'], 'error', str(e))
             all_ok = False
             continue
-        all_ok = process_message(msg) and all_ok
+        all_ok = process_message(msg, ingest_batch_id=row.get('ingest_batch_id')) and all_ok
+        if row.get('ingest_batch_id'):
+            retry_batch_ids.add(row['ingest_batch_id'])
+    for batch_id in retry_batch_ids:
+        removed = db.consolidate_ingest_batch_threads(batch_id)
+        if removed:
+            logger.info('Consolidated %s older thread lead(s) from retry batch %s.',
+                        removed, batch_id)
     return all_ok
 
 
@@ -267,9 +397,16 @@ def main():
         sys.exit(1)
 
     logger.info(f'{len(messages)} message(s).')
+    ingest_batch_id = uuid.uuid4().hex
     all_ok = True
     for msg in messages:
-        all_ok = process_message(msg, force=args.force) and all_ok
+        all_ok = process_message(
+            msg, force=args.force, ingest_batch_id=ingest_batch_id,
+        ) and all_ok
+
+    removed = db.consolidate_ingest_batch_threads(ingest_batch_id)
+    if removed:
+        logger.info('Consolidated %s older lead(s) from same-batch email threads.', removed)
 
     if not args.recent:
         if all_ok:

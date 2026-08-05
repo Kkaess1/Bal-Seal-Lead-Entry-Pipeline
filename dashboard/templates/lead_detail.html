@@ -2,14 +2,14 @@
 {% block title %}{{ lead.display_name }}{% endblock %}
 {% block content %}
   <p>
-    {% if lead.status in ('pending_review', 'review_approved') %}
+    {% if request.args.get('forwarded') or lead.status in ('pending_review', 'review_approved') %}
       <a href="{{ url_for('index') }}">&larr; back to pending review</a>
     {% else %}
       <a href="{{ url_for('history') }}">&larr; back to history</a>
     {% endif %}
   </p>
 
-  <div class="card">
+  <div class="card lead-detail-card">
     <div class="card-head">
       <h2>{{ lead.display_name }}{% if lead.organization %} &mdash; {{ lead.organization }}{% endif %}</h2>
     </div>
@@ -20,6 +20,13 @@
       </div>
     {% endif %}
 
+    {% for message in get_flashed_messages(category_filter=['forward_success']) %}
+      <div class="forward-notice forward-notice-success" role="status">{{ message }}</div>
+    {% endfor %}
+    {% for message in get_flashed_messages(category_filter=['forward_error']) %}
+      <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
+    {% endfor %}
+
     {% if lead.status in ('pending_review', 'review_approved') %}
       <form method="post" action="{{ url_for('save_lead', lead_id=lead.id) }}">
         <table style="width: 100%; margin-top: 0.5rem; border-collapse: collapse;">
@@ -28,6 +35,9 @@
               <td style="width: 160px; vertical-align: top; padding: 0.5rem 0.5rem 0.5rem 0;"><span class="field-name">{{ field }}</span></td>
               <td style="padding: 0.5rem 0;">
                 {% if field in ('lead_details', 'notes_body', 'survey_answers', 'qualifiers') %}
+                  {% if field == 'lead_details' and lead.translated_from %}
+                    <div class="translation-notice">Translated from {{ lead.translated_from }} to English</div>
+                  {% endif %}
                   <textarea name="{{ field }}" style="width: 100%; min-height: 80px; font-family: inherit;">{{ lead[field] or '' }}</textarea>
                 {% else %}
                   <input type="text" name="{{ field }}" value="{{ lead[field] or '' }}" style="width: 100%; font-family: inherit;">
@@ -68,5 +78,56 @@
         {% endif %}
       </div>
     {% endif %}
+
+    {% if lead.status in ('pending_review', 'review_approved') %}
+      <button type="button" class="forward-fab" id="open-forward-dialog"
+              title="Forward this email" aria-label="Forward this email">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m15 8 5 4-5 4"></path>
+          <path d="M4 18v-2a4 4 0 0 1 4-4h12"></path>
+        </svg>
+      </button>
+    {% endif %}
   </div>
+
+  {% if lead.status in ('pending_review', 'review_approved') %}
+    <dialog class="forward-dialog" id="forward-dialog">
+      <form method="post" action="{{ url_for('forward_lead_email', lead_id=lead.id) }}">
+        <div class="forward-dialog-head">
+          <h3>Forward email</h3>
+          <button type="button" class="forward-dialog-close" aria-label="Close">&times;</button>
+        </div>
+        <p class="meta">The original email, including its attachments, will be forwarded and removed from the lead review queue.</p>
+        <label for="forward-recipient">Forward to</label>
+        <input type="email" id="forward-recipient" name="recipient" required
+               autocomplete="email" placeholder="name@example.com">
+        <label for="forward-note">Message <span class="label-optional">(optional)</span></label>
+        <textarea id="forward-note" name="forward_note" maxlength="5000"
+                  placeholder="Add a message above the forwarded email..."></textarea>
+        <div class="actions forward-dialog-actions">
+          <button type="button" class="btn btn-secondary forward-cancel">Cancel</button>
+          <button type="submit" class="btn-approve">Send email</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script>
+      (function() {
+        var dialog = document.getElementById('forward-dialog');
+        var openButton = document.getElementById('open-forward-dialog');
+        if (!dialog || !openButton) return;
+        var closeDialog = function() { dialog.close(); };
+        openButton.addEventListener('click', function() {
+          dialog.showModal();
+          document.getElementById('forward-recipient').focus();
+        });
+        dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
+        dialog.querySelector('.forward-cancel').addEventListener('click', closeDialog);
+        dialog.addEventListener('click', function(event) {
+          if (event.target === dialog) closeDialog();
+        });
+      })();
+    </script>
+  {% endif %}
 {% endblock %}

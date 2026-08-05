@@ -14,8 +14,12 @@ pipeline.db
 # Local auth/session state
 auth/
 
-# Cached emails and logs
+# Cached emails and logs. email_attachments/ holds real customer spreadsheets
+# and email_messages/ holds whole exported emails -- same third-party PII the
+# input/ rule below exists for.
 email_cache/
+email_attachments/
+email_messages/
 logs/
 
 # Real lead data (contains third-party PII) -- never commit actual lead

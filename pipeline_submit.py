@@ -1,63 +1,47 @@
 """
-Scheduled entry point: submit approved leads to Oracle Sales Cloud.
+Entry point: submit approved leads to Oracle Sales Cloud via its REST API.
 
-Two modes, controlled by config.json's oracle.auto_submit:
-  - false -- "fill but don't submit" validation mode. Fills each approved
-    lead's form via create_lead() and asks a human at the terminal to review
-    it in the browser, click Save and Close themselves, and confirm
-    success/failure back here. THIS MODE MUST BE RUN BY HAND, WATCHED -- do
-    not put it on Task Scheduler, it will hang waiting on input() with no one
-    there to answer.
-  - true (current setting, as of 2026-07-21) -- full unattended submission via
-    submit_lead() (fill + click Save and Close + verify), no human
-    interaction. This is what's now on Task Scheduler (see the "Lead Pipeline
-    - Submit" task). Enabled after fill-only mode was exercised, Oracle session
-    persistence was confirmed working against the real tenant, and one real
-    lead (Interlune) went through this exact path successfully -- see the plan
-    notes for what was found and fixed along the way (an Owner-field bug) and
-    what's still being actively monitored (Oracle session lifetime under
-    normal use, real risk of a field silently not populating correctly even
-    though the lead still saves and reports success).
+Only ever acts on leads with status='approved' (set via the dashboard's
+Approve button). Each lead is atomically claimed before submission, so two
+overlapping runs can't send the same one twice.
 
-Either way: only ever acts on leads with status='approved' (set via the
-dashboard's Approve button).
+Before contacting Oracle, every lead is checked against the local record of
+what has already been submitted (db.find_submitted_duplicate). That guard is
+the one that holds: Oracle's own dedup query can't see leads it hasn't
+assigned an owner to yet, including ones this pipeline created minutes ago.
 
-Login (as of 2026-07-20): tries the restored storage_state session first
-(fast); if that's actually expired, falls back to a real username/password
-auto-login via oracle_automation.OracleLeadAutomator.ensure_logged_in() --
-this tenant has no MFA (confirmed by hand previously), and Keaton explicitly
-asked for this so the whole pipeline doesn't stall waiting on a manual
-oracle_login_capture.py recapture every time the ~30-60 min session expires
-between the twice-daily runs. Credentials come from secrets_store.py
-(ORACLE_USERNAME/ORACLE_PASSWORD in the OS credential store), never
-hardcoded. Exactly one login attempt per run -- if that fails (e.g. bad/
-rotated credentials), the run aborts the same as before; approved leads are
-left untouched and retried next run.
+Credentials come from secrets_store.py (ORACLE_USERNAME/ORACLE_PASSWORD in the
+OS credential store), never hardcoded.
+
+A Playwright browser-automation submitter used to live alongside this as a
+fallback and was removed on 2026-07-31. The REST path is the only way leads
+reach Oracle.
 
 Usage:  py pipeline_submit.py
 """
 
 import json
 import logging
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+import company_website
 import db
 import secrets_store
 from oracle_api import OracleApiError, OracleLeadApiClient
-from oracle_automation import OracleLeadAutomator
 
 logger = logging.getLogger(__name__)
 LOG_DIR = Path(__file__).parent / 'logs'
 
 
 def setup_logging():
-    """Same pattern as pipeline_ingest.py/main.py -- a scheduled Task Scheduler
-    run has no console anyone is watching, so this is the only record of what
-    an unattended submit run actually did (which leads, any failures)."""
+    """Same pattern as pipeline_ingest.py -- a scheduled Task Scheduler run has
+    no console anyone is watching, so this is the only record of what an
+    unattended submit run actually did (which leads, any failures)."""
     LOG_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = LOG_DIR / f'submit_{stamp}.log'
@@ -71,12 +55,11 @@ def setup_logging():
     )
     return log_file
 
-# Leads from a real trade-show batch (an Excel attachment on an email) get the
-# same "Tradeshow" labeling main.py already uses; leads extracted from a direct
-# email inquiry are not trade-show contacts and get labeled accordingly instead.
+# Every lead originates in the Sales inbox. A spreadsheet attached to one of
+# those emails is a trade-show batch and gets labeled accordingly; a lead
+# extracted from the email body itself is a direct inquiry.
 _SOURCE_LABELS = {
     'email_excel_attachment': ('Tradeshow', 'Email Import'),
-    'manual_excel': ('Tradeshow', 'Email Import'),
     'email_ai_extract': ('Inquiry', 'Website/Email'),
 }
 _DEFAULT_SOURCE_LABEL = ('Inquiry', 'Website/Email')
@@ -91,121 +74,59 @@ def _load_oracle_config():
         config = json.load(f)
     oracle_config = dict(config['oracle'])
     # Every lead this pipeline submits comes from the Sales inbox (website
-    # inquiries/form submissions), never a physical trade show -- forced here
-    # rather than in config.json itself, since main.py's separate manual
-    # Excel-import flow still legitimately uses config.json's lead_source
-    # value for real trade-show batches.
+    # inquiries/form submissions), never a physical trade show. Forced here so
+    # it holds regardless of what config.json carries.
     oracle_config['lead_source'] = 'Website'
-    # Respect config.json's headless setting (defaults to False if not set)
-    oracle_config['headless'] = config.get('oracle', {}).get('headless', False)
-    # This run never waits on a human -- ensure_logged_in() drives
-    # _auto_login() directly when needed, bypassing the manual_login branch
-    # in login()/navigate_to_leads() entirely. Set for clarity/consistency
-    # even though ensure_logged_in() doesn't itself branch on this flag.
-    oracle_config['manual_login'] = False
-    oracle_config.setdefault('submission_method', 'api')
     return oracle_config
 
 
-def _run_fill_only(bot, leads):
-    """Phase-3-style validation mode: fill each lead, a human reviews and
-    clicks Save and Close themselves, then confirms the result here so the
-    dashboard's history stays accurate even though the pipeline didn't click
-    the final button itself."""
-    print()
-    print('=' * 60)
-    print('  FILL-ONLY MODE (oracle.auto_submit = false in config.json)')
-    print('  Each lead will be filled in. Review it, click Save and Close')
-    print('  yourself, then confirm the result here.')
-    print('=' * 60)
 
-    results = {'ok': 0, 'fail': 0}
-    for lead in leads:
-        if not db.claim_lead_for_submission(lead['id']):
-            continue
-        source_label, trade_show_name = _project_label(lead)
-        label = f"{lead.get('organization') or '?'} - {lead.get('first_name') or ''} {lead.get('last_name') or ''}"
-        print(f'\n[{label}]')
-        try:
-            project_name = bot.create_lead(lead, trade_show_name, source_label=source_label)
-            print(f'  Filled: {project_name}')
-        except Exception as e:
-            logger.error(f'  Failed to fill lead {lead["id"]}: {e}')
-            bot.screenshot(f'submit_fill_fail_{lead["id"]}.png')
-            db.mark_lead_failed(lead['id'], f'Fill failed: {e}')
-            results['fail'] += 1
-            continue
-
-        answer = input('  Saved successfully in the browser? [y/n]: ').strip().lower()
-        if answer.startswith('y'):
-            db.mark_lead_submitted(lead['id'], project_name)
-            results['ok'] += 1
-        else:
-            reason = input('  What went wrong? (optional): ').strip()
-            db.mark_lead_failed(lead['id'], reason or 'Human reported failure in fill-only mode')
-            results['fail'] += 1
-    return results
+def _attachment_file_name(lead, path):
+    """Name the attachment after the email's subject line so the Oracle
+    Attachments row is recognisable, keeping the real file's extension (.msg
+    for an exported Outlook message, .txt for a cached body)."""
+    subject = ''
+    if lead.get('message_id'):
+        msg_row = db.get_message(lead['message_id']) or {}
+        subject = msg_row.get('subject') or ''
+    safe_subject = re.sub(r'[^\w\s\-]', '', subject).strip()[:80]
+    return f'{safe_subject or "source_email"}{Path(path).suffix or ".txt"}'
 
 
-def _run_auto_submit(bot, leads):
-    """Full unattended submission -- no human interaction. Only reached when
-    config.oracle.auto_submit is true."""
-    results = {'ok': 0, 'fail': 0}
-    for lead in leads:
-        if not db.claim_lead_for_submission(lead['id']):
-            logger.info(
-                f'  Skipped lead {lead["id"]}; it was claimed or changed by another run.'
+def _attach_source_email(client, lead, oracle_id, result):
+    """
+    Attach the lead's source email to the Oracle lead record that was just
+    created. Returns a warning string to store on the lead, or None.
+
+    Wrapped end-to-end in a catch-all on purpose: this runs *after* Oracle has
+    already accepted the lead, and _run_api_submit's outer handler responds to
+    an exception by scheduling a retry. Anything escaping from here would
+    therefore resubmit a lead that already exists in Oracle. Failing to attach
+    a file is never worth a duplicate lead.
+    """
+    if not oracle_id:
+        return None
+    try:
+        attachment_path = db.get_lead_email_attachment(lead['id'])
+        if not attachment_path:
+            logger.warning(
+                f'  No source email on file for lead {lead["id"]}; nothing to attach.'
             )
-            continue
-        source_label, trade_show_name = _project_label(lead)
-        label = f"{lead.get('organization') or '?'} - {lead.get('first_name') or ''} {lead.get('last_name') or ''}"
-        try:
-            success, project_name, error_detail = bot.submit_lead(
-                lead, trade_show_name, source_label=source_label
-            )
-            if success:
-                db.mark_lead_submitted(lead['id'], project_name)
-                logger.info(f'  Submitted: {label} ({project_name})')
-                results['ok'] += 1
-            else:
-                if (error_detail or '').startswith('SUBMISSION_OUTCOME_UNKNOWN:'):
-                    db.mark_submission_unknown(
-                        lead['id'], error_detail, oracle_project_name=project_name
-                    )
-                else:
-                    db.mark_lead_failed(lead['id'], error_detail)
-                logger.error(f'  Failed: {label} -- {error_detail}')
-                results['fail'] += 1
-        except Exception as e:
-            detail = str(e)
-            fatal_browser_error = any(
-                marker in detail.lower()
-                for marker in (
-                    'target page', 'browser has been closed', 'context has been closed',
-                )
-            )
-            if bot._save_clicked:
-                db.mark_submission_unknown(
-                    lead['id'],
-                    f'Submission interrupted after Save was attempted: {detail}. '
-                    'Check Oracle before retrying.',
-                    oracle_project_name=(
-                        f"{(lead.get('organization') or '').upper().strip()} - "
-                        f"{(lead.get('first_name') or '').strip()} "
-                        f"{(lead.get('last_name') or '').strip()} - "
-                        f"{source_label} - {trade_show_name}"
-                    ).strip(),
-                )
-            else:
-                db.schedule_lead_retry(lead['id'], detail)
-            logger.exception(f'  Exception submitting {label}: {e}')
-            results['fail'] += 1
-            if fatal_browser_error:
-                logger.error(
-                    'Browser session is no longer usable; aborting the remaining batch.'
-                )
-                break
-    return results
+            return None
+
+        file_name = _attachment_file_name(lead, attachment_path)
+        if client.upload_attachment(
+            oracle_id, attachment_path, file_name=file_name,
+            oracle_response=result.get('response'),
+        ):
+            return None
+        return (
+            'Source email could not be attached to the Oracle lead; '
+            'attach it by hand if it is needed.'
+        )
+    except Exception as e:
+        logger.exception(f'  Attaching source email to lead {lead["id"]} failed: {e}')
+        return f'Source email attachment step errored ({e}); attach it by hand if needed.'
 
 
 def _run_api_submit(client, leads):
@@ -220,15 +141,51 @@ def _run_api_submit(client, leads):
 
         source_label, trade_show_name = _project_label(lead)
         label = f"{lead.get('organization') or '?'} - {lead.get('first_name') or ''} {lead.get('last_name') or ''}"
+
+        # Local duplicate guard, checked before Oracle is touched at all.
+        # Oracle's own dedup query cannot see leads it has not yet assigned an
+        # owner to -- including ones this pipeline created minutes earlier --
+        # so it silently misses the most likely duplicates. See
+        # db.find_submitted_duplicate().
+        prior = db.find_submitted_duplicate(lead['id'])
+        if prior:
+            detail = (
+                f'Not sent to Oracle: lead {prior["id"]} '
+                f'({prior.get("oracle_project_name") or "no project name"}) was already '
+                f'submitted as Oracle record {prior["oracle_record_id"]} on '
+                f'{(prior.get("submitted_at") or "")[:10]}.'
+            )
+            db.mark_lead_duplicate_of_submitted(lead['id'], prior, detail)
+            logger.warning(f'  Skipped as duplicate: {label} -- {detail}')
+            results['ok'] += 1
+            continue
+
+        # Backstop for leads staged before website derivation existed (and for
+        # any source that bypasses pipeline_ingest): fill it in here so they
+        # aren't submitted with an empty Website field. Persisted, so the
+        # dashboard shows what Oracle was actually sent.
+        if not (lead.get('website') or '').strip():
+            website = company_website.derive_website(lead)
+            if website:
+                lead['website'] = website
+                db.update_lead_fields(lead['id'], {'website': website})
+
         try:
             result = client.submit_lead(
                 lead, trade_show_name, source_label=source_label
             )
+            all_warnings = list(result.get('field_warnings') or [])
+
+            oracle_id = result.get('oracle_record_id')
+            warning = _attach_source_email(client, lead, oracle_id, result)
+            if warning:
+                all_warnings.append(warning)
+
             db.mark_lead_submitted(
                 lead['id'],
                 result['project_name'],
-                oracle_record_id=result.get('oracle_record_id'),
-                field_warnings=result.get('field_warnings'),
+                oracle_record_id=oracle_id,
+                field_warnings=all_warnings or None,
             )
             if result.get('oracle_lead_number'):
                 logger.info(
@@ -237,7 +194,7 @@ def _run_api_submit(client, leads):
                 )
             else:
                 logger.info(f'  Submitted via API: {label} ({result["project_name"]})')
-            for warning in result.get('field_warnings') or []:
+            for warning in all_warnings:
                 logger.warning(f'  Field warning for lead {lead["id"]}: {warning}')
             results['ok'] += 1
         except OracleApiError as e:
@@ -274,21 +231,13 @@ def main():
         )
 
     oracle_config = _load_oracle_config()
-    auto_submit = oracle_config.get('auto_submit', False)
-    submission_method = (
-        oracle_config.get('submission_method')
-        or ('playwright' if not auto_submit else 'api')
-    ).strip().lower()
 
     leads = db.list_ready_for_submission()
     if not leads:
         logger.info('No approved leads waiting for submission.')
         return
 
-    logger.info(
-        f'{len(leads)} approved lead(s) to submit. '
-        f'auto_submit={auto_submit}, submission_method={submission_method}'
-    )
+    logger.info(f'{len(leads)} approved lead(s) to submit.')
 
     username = secrets_store.get_secret('ORACLE_USERNAME')
     password = secrets_store.get_secret('ORACLE_PASSWORD')
@@ -298,37 +247,9 @@ def main():
         )
         sys.exit(1)
 
-    if submission_method == 'api':
-        client = OracleLeadApiClient(oracle_config, username=username, password=password)
-        results = _run_api_submit(client, leads)
-        db.set_run_state('oracle_session_status', 'api')
-        db.set_run_state('last_submit_run_at', datetime.now(timezone.utc).isoformat())
-        logger.info(f"Submit run complete. {results['ok']} ok, {results['fail']} failed.")
-        return
-
-    if submission_method != 'playwright':
-        logger.error(
-            f'Unsupported oracle.submission_method "{submission_method}". '
-            'Use "api" or "playwright".'
-        )
-        sys.exit(1)
-
-    with OracleLeadAutomator(oracle_config, username=username, password=password) as bot:
-        if not bot.ensure_logged_in():
-            logger.error(
-                'Could not establish an Oracle session -- restored session was invalid '
-                'and auto-login failed (check ORACLE_USERNAME/ORACLE_PASSWORD in the OS '
-                'credential store, or run py oracle_login_capture.py manually).'
-            )
-            db.set_run_state('oracle_session_status', 'expired')
-            sys.exit(1)
-        db.set_run_state('oracle_session_status', 'valid')
-
-        if auto_submit:
-            results = _run_auto_submit(bot, leads)
-        else:
-            results = _run_fill_only(bot, leads)
-
+    client = OracleLeadApiClient(oracle_config, username=username, password=password)
+    results = _run_api_submit(client, leads)
+    db.set_run_state('oracle_session_status', 'api')
     db.set_run_state('last_submit_run_at', datetime.now(timezone.utc).isoformat())
     logger.info(f"Submit run complete. {results['ok']} ok, {results['fail']} failed.")
 

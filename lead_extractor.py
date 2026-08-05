@@ -26,9 +26,9 @@ import secrets_store
 # Exact Oracle "Market" dropdown values (from Keaton's real markets list,
 # 2026-07-21) -- market classification must output one of these verbatim, or
 # nothing at all. A near-miss string (e.g. "Aerospace" instead of
-# "AEROSPACE/DEFENSE") would silently fail to select anything in
-# oracle_automation.py's _select_dropdown(), so extract_lead() validates
-# against this list rather than trusting free-form model output.
+# "AEROSPACE/DEFENSE") has no mapping in oracle_api.MARKET_TO_API_VALUE and
+# would be silently defaulted, so extract_lead() validates against this list
+# rather than trusting free-form model output.
 MARKET_OPTIONS = [
     'AEROSPACE/DEFENSE',
     'ALTERNATIVE ENERGY',
@@ -167,12 +167,14 @@ Fields to extract (field_name: description):
 First decide:
 1. Is this email a genuine sales inquiry/lead (someone asking about a product, requesting a quote, describing a technical need), as opposed to spam, a newsletter, an internal email, a vendor pitching TO us, or something unrelated?
 2. Is this email a follow-up or reply on an existing thread (e.g. status update, reply to an earlier email, ongoing conversation between customer and rep) rather than a brand-new initial inquiry?
+3. What is the primary language of the sender's new message? Return its common English name (for example English, German, Japanese, or Spanish). Ignore quoted older messages when deciding.
 
 Return ONLY a JSON object with this exact shape, no explanation outside the JSON:
 {{
   "is_lead": true or false,
   "is_followup": true or false,
   "followup_reason": "short explanation if is_followup is true, else null",
+  "source_language": "common English name of the primary language",
   "confidence": 0.0 to 1.0,
   "fields": {{ ...only fields you are confident about, omit the rest... }},
   "plausibility": {{
@@ -234,6 +236,7 @@ Return ONLY a JSON object with this exact shape, no explanation outside the JSON
             'is_lead': is_lead if isinstance(is_lead, bool) else None,
             'is_followup': is_followup if isinstance(is_followup, bool) else False,
             'followup_reason': str(parsed.get('followup_reason') or ''),
+            'source_language': str(parsed.get('source_language') or 'English')[:50],
             'confidence': confidence,
             'fields': validated_fields,
             'plausibility': {

@@ -1,6 +1,6 @@
 """
 AI-powered column header mapper using Claude.
-Maps arbitrary Excel column headers to the internal field names used by oracle_automation.py.
+Maps arbitrary Excel column headers to the pipeline's internal lead field names.
 Results are cached to disk so the same header set is never re-analyzed.
 """
 

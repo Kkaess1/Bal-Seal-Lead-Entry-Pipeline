@@ -3,9 +3,8 @@ Thin secret-retrieval wrapper: tries the OS credential store (via `keyring`,
 Windows Credential Manager on this machine) first, falls back to environment
 variables (.env) for local dev convenience or if keyring is unavailable.
 
-Only meant for actual short secrets (API keys). The MSAL token cache and
-Oracle storage_state are bearer-credential *files*, not short strings --
-those live in auth/ instead, not here.
+Only meant for actual short secrets (API keys, the Oracle username/password
+used for REST basic auth).
 
 Usage to store a secret:  py secrets_store.py ANTHROPIC_API_KEY sk-...
 """

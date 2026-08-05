@@ -9,7 +9,22 @@ import time
 import requests
 import secrets_store
 
-DEFAULT_GEMINI_MODEL = 'gemini-flash-latest'
+# Pinned deliberately. This was 'gemini-flash-latest', a floating alias Google
+# repoints to each new Flash release -- which meant the model behind lead
+# extraction could change without a commit here, leaving a bad week of
+# extraction quality impossible to tell apart from a prompt problem. It also
+# drifts on price: Flash input went from $0.30/M at 2.5 to $1.50/M at 3.6.
+#
+# Flash rather than Pro because these are short documents (median 96 tokens of
+# body across email_cache/) and the work is field extraction, not reasoning.
+# Stable rather than a *-preview build because previews get revised and
+# withdrawn, which defeats the point of pinning. At roughly 1 cent per lead the
+# tier choice is worth ~$30/year either way, so accuracy and stability decide
+# it, not cost.
+#
+# Revisit when Google ships the next stable Flash: bump this and diff the
+# extracted fields over email_cache/ before trusting it.
+DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash'
 
 
 def get_gemini_key():
