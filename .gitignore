@@ -3,9 +3,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# SQLite database file
+# SQLite database file, and the sidecars SQLite keeps beside it.
+#
+# The -shm/-wal rules are not tidiness: a WAL file holds transactions not yet
+# folded into the .db, so it carries the same real lead PII the database does.
+# `*.db` does not match `foo.db-wal`, so every backup taken by the migration
+# scripts left two unignored files sitting in the repo root, ready for the
+# first `git add -A` to publish.
 pipeline.db
 *.db
+*.db-shm
+*.db-wal
 
 # Environment files
 .env
@@ -25,6 +33,13 @@ logs/
 # Real lead data (contains third-party PII) -- never commit actual lead
 # spreadsheets, only code that processes them
 input/
+
+# Reference documents shown on the dashboard's Reference tab: internal sales
+# material (territory maps, price lists) that does not belong in the repo.
+# The folder and its README stay tracked so the drop-folder still exists on a
+# fresh clone.
+reference/*
+!reference/README.md
 
 dashboard.log
 
