@@ -1,62 +1,69 @@
 {% extends 'base.html' %}
 {% block title %}History{% endblock %}
 {% block content %}
-  <h2>History ({{ leads|length }})</h2>
+  <h2>History ({{ total }})</h2>
   {% if not leads %}
     <p class="empty">Nothing here yet.</p>
   {% else %}
-    <div class="card" style="padding: 1.25rem; overflow-x: auto;">
-      <table style="width: 100%; border-collapse: collapse; font-size: 0.92rem;">
-        <thead>
-          <tr style="border-bottom: 2px solid var(--border); text-align: left;">
-            <th style="padding: 0.6rem; width: 110px;">Status</th>
-            <th style="padding: 0.6rem; min-width: 140px;">Name</th>
-            <th style="padding: 0.6rem; min-width: 140px;">Organization</th>
-            <th style="padding: 0.6rem; min-width: 180px;">Email</th>
-            <th style="padding: 0.6rem; width: 140px; white-space: nowrap;">Email Date</th>
-            <th style="padding: 0.6rem; width: 140px; white-space: nowrap;">Reviewed</th>
-            <th style="padding: 0.6rem; min-width: 160px;">Notes</th>
-            <th style="padding: 0.6rem; width: 130px; text-align: right;">Action</th>
-          </tr>
-        </thead>
+    <div class="card history-wrap">
+      <table class="history-table">
+        <colgroup>
+          <col style="width:130px"><col style="width:12%"><col style="width:13%">
+          <col style="width:16%"><col style="width:100px"><col style="width:88px">
+          <col style="width:13%"><col style="width:152px">
+        </colgroup>
+        <thead><tr>
+          <th>Status</th><th>Name</th><th>Organization</th><th>Email</th>
+          <th>Email Date</th><th>Reviewed</th><th>Notes</th><th>Action</th>
+        </tr></thead>
         <tbody>
           {% for lead in leads %}
-            <tr style="border-bottom: 1px solid var(--border);">
-              <td style="padding: 0.65rem 0.6rem; vertical-align: top;">
-                <span class="badge badge-{{ 'clear' if lead.status in ('submitted', 'approved') else 'reject' if lead.status in ('rejected','failed') else 'review' }}">{{ lead.status|upper }}</span>
+            <tr>
+              <td data-label="Status">
+                {# Sentence case, not |upper: the badge no longer shouts in CSS,
+                   so forcing the text uppercase here would be the only thing
+                   still doing it. #}
+                <span class="badge badge-{{ 'clear' if lead.status in ('submitted', 'approved') else 'reject' if lead.status in ('rejected','failed') else 'review' }}">
+                  {{ lead.status|replace('_', ' ')|capitalize }}
+                </span>
               </td>
-              <td style="padding: 0.65rem 0.6rem; vertical-align: top;">
-                <a href="{{ url_for('lead_detail', lead_id=lead.id) }}" style="font-weight: 600;">{{ lead.display_name }}</a>
-              </td>
-              <td style="padding: 0.65rem 0.6rem; vertical-align: top;">{{ lead.organization or '—' }}</td>
-              <td style="padding: 0.65rem 0.6rem; vertical-align: top; word-break: break-all;">{{ lead.email or '—' }}</td>
-              <td style="padding: 0.65rem 0.6rem; vertical-align: top; white-space: nowrap; font-size: 0.85rem;">
-                {{ lead.received_date_short or '—' }}
-              </td>
-              <td style="padding: 0.65rem 0.6rem; vertical-align: top; white-space: nowrap; font-size: 0.85rem;">
-                {{ (lead.reviewed_at or '')[:16]|replace('T', ' ') or '—' }}
-              </td>
-              <td style="padding: 0.65rem 0.6rem; vertical-align: top;">
-                {{ lead.review_notes or lead.submit_error or '—' }}
-              </td>
-              <td style="padding: 0.65rem 0.6rem; vertical-align: top; text-align: right;">
-                {% if lead.status in ('rejected', 'failed') %}
-                  <form method="post" action="{{ url_for('restore', lead_id=lead.id) }}" style="display:inline; margin:0;">
-                    <button type="submit" class="btn-secondary" style="font-size: 0.78rem; padding: 0.3rem 0.6rem; white-space: nowrap;">Return to Review</button>
-                  </form>
-                {% elif lead.status == 'submission_unknown' %}
-                  <form method="post" action="{{ url_for('unknown_confirmed', lead_id=lead.id) }}" style="display:inline; margin:0;">
-                    <button type="submit" class="btn-approve" style="font-size: 0.72rem; padding: 0.3rem 0.55rem; white-space: nowrap;">Confirmed in Oracle</button>
-                  </form>
-                  <form method="post" action="{{ url_for('unknown_retry', lead_id=lead.id) }}" style="display:inline; margin:0;">
-                    <button type="submit" class="btn-secondary" style="font-size: 0.72rem; padding: 0.3rem 0.55rem; white-space: nowrap;">Checked—Retry</button>
-                  </form>
-                {% endif %}
+              <td data-label="Name"><a href="{{ url_for('lead_detail', lead_id=lead.id) }}"><strong>{{ lead.display_name }}</strong></a></td>
+              <td data-label="Organization">{{ lead.organization or '—' }}</td>
+              <td data-label="Email">{{ lead.email or '—' }}</td>
+              <td data-label="Email date">{{ lead.received_date_short or '—' }}</td>
+              <td data-label="Reviewed">{{ (lead.reviewed_at or '')[:16]|replace('T', ' ') or '—' }}</td>
+              <td data-label="Notes">{{ lead.review_notes or lead.submit_error or '—' }}</td>
+              <td data-label="Action">
+                <div class="history-actions">
+                  {# The statuses the restore route accepts, from lead_stages
+                     rather than repeated here -- a page offering a button the
+                     route refuses, or withholding one it allows, is how a lead
+                     ends up with no way back. #}
+                  {% if lead.status in returnable_statuses %}
+                    <form method="post" action="{{ url_for('restore', lead_id=lead.id) }}">
+                      <button type="submit" class="btn-secondary">Return to Review</button>
+                    </form>
+                  {% elif lead.status == 'submission_unknown' %}
+                    <form method="post" action="{{ url_for('unknown_confirmed', lead_id=lead.id) }}">
+                      <button type="submit" class="btn-approve">Confirmed in Oracle</button>
+                    </form>
+                    <form method="post" action="{{ url_for('unknown_retry', lead_id=lead.id) }}">
+                      <button type="submit" class="btn-secondary">Checked—Retry</button>
+                    </form>
+                  {% endif %}
+                </div>
               </td>
             </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
+    {% if pages > 1 %}
+      <nav class="pagination" aria-label="History pages">
+        {% if page > 1 %}<a class="btn-secondary" href="{{ url_for('history', page=page-1) }}">Previous</a>{% endif %}
+        <span>Page {{ page }} of {{ pages }}</span>
+        {% if page < pages %}<a class="btn-secondary" href="{{ url_for('history', page=page+1) }}">Next</a>{% endif %}
+      </nav>
+    {% endif %}
   {% endif %}
 {% endblock %}

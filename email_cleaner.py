@@ -26,6 +26,80 @@ _CAUTION_BANNER_RE = re.compile(
     r'^CAUTION:\s*This email originated from outside.*$\n?', re.IGNORECASE | re.MULTILINE
 )
 
+# Proofpoint's external-sender banner, and the hidden preheader above it.
+#
+# Proofpoint injects its warning as a marked div pair at the very top of the
+# HTML body:  <div id="...BannerStart"> ... <div id="...BannerEnd">.  Whatever
+# sits above that is the sender's *preheader* -- the display:none block bulk
+# mailers put first so the mail client has preview text for the message list.
+# Outlook renders neither: not the markers, not the banner chrome, and not the
+# hidden preheader.  Flattening the HTML to text exposed all three, and because
+# a preheader is normally the opening of the message re-typed as one run-on
+# line, the result read as the email arriving twice -- a truncated copy, then
+# the real one.  That is the "double message" this strips.
+#
+# Verified against every cached body carrying the marker (37 of 254): the text
+# above BannerStart was always either empty, zero-width-joiner padding, or a
+# whitespace-normalised truncation of the body below it.  Never unique content.
+#
+# Anchored at \A: everything from the start of the body through the end of the
+# banner goes, because all of it sits above the message a human was shown.
+_PREHEADER_AND_BANNER_RE = re.compile(
+    r'\A.*?'
+    r'[A-Za-z0-9]{4,}BannerStart\b'
+    r'.*?'
+    r'[A-Za-z0-9]{4,}BannerEnd\b[ \t]*\n?',
+    re.DOTALL,
+)
+
+# The From/Date/Subject block _cache_body() writes at the top of
+# email_cache/*.txt. get_lead_email_thread() cleans those files whole, so the
+# header has to be lifted off before the \A-anchored cut above runs -- it is
+# above the banner, and would otherwise be swallowed with the preheader.
+_CACHE_HEADER_RE = re.compile(
+    r'\AFrom:[^\n]*\n(?:[^\n]*\n){0,4}?={10,}[ \t]*\n+'
+)
+
+# Any further banner pair -- one per quoted message down a reply chain. The
+# rule above is lazy and only reaches the first, and only the first has a
+# preheader above it worth cutting.
+_BANNER_BLOCK_RE = re.compile(
+    r'[A-Za-z0-9]{4,}BannerStart\b.*?[A-Za-z0-9]{4,}BannerEnd\b[ \t]*\n?', re.DOTALL
+)
+
+# A half-pair: the message was forwarded/truncated between the two markers, so
+# there is no block to match. Drop the marker's line rather than leave a line
+# of gibberish in the middle of the text.
+_BANNER_MARKER_RE = re.compile(
+    r'^.*[A-Za-z0-9]{4,}Banner(?:Start|End)\b.*$\n?', re.MULTILINE
+)
+
+# The banner's own wording, for gateways that tag the text without markers.
+_EXTERNAL_SENDER_RE = re.compile(
+    r'^[ \t]*(?:This Message Is From an External Sender'
+    r'|This message came from outside your organization)[ \t.]*$\n?',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def strip_security_banners(text):
+    """
+    Remove mail-gateway external-sender banners, and the hidden preheader a
+    Proofpoint banner separates from the real body. See the patterns above.
+    """
+    if not text:
+        return text
+    header = ''
+    m = _CACHE_HEADER_RE.match(text)
+    if m:
+        header, text = m.group(0), text[m.end():]
+    text = _PREHEADER_AND_BANNER_RE.sub('', text)
+    text = _BANNER_BLOCK_RE.sub('', text)
+    text = _BANNER_MARKER_RE.sub('', text)
+    text = _CAUTION_BANNER_RE.sub('', text)
+    text = _EXTERNAL_SENDER_RE.sub('', text)
+    return header + text
+
 # Quoted reply history -- only the text above the first of these is what this
 # sender actually wrote; everything below is the previous message(s) in the
 # thread, already visible to them and not new information for a lead review.
@@ -287,6 +361,12 @@ def clean_email_body(text):
     if not text:
         return text
 
+    # Banners come off first. The hidden preheader a Proofpoint banner sits
+    # below is a run-on copy of the message's opening, and leaving it in place
+    # would let it reach the form parser and the quoted-history cut as though
+    # it were real body text.
+    text = strip_security_banners(text)
+
     # Form submissions get reduced to their answers first; the cleanup below
     # then strips whatever tracking URLs and mailto links survive inside them.
     form_text = extract_form_submission(text)
@@ -298,7 +378,6 @@ def clean_email_body(text):
         if m:
             text = text[:m.start()]
 
-    text = _CAUTION_BANNER_RE.sub('', text)
     text = _MAILTO_RE.sub('', text)
     text = _LONG_BRACKETED_URL_RE.sub('', text)
 
@@ -322,6 +401,113 @@ def clean_email_body(text):
 
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+
+def extract_quoted_history(text, max_chars=40000):
+    """
+    The earlier exchange quoted inside a reply -- everything clean_email_body()
+    cuts off, which is exactly what a reviewer means by "the rest of the
+    thread".
+
+    This is usually the only copy there is. The messages a "Re:" answers were
+    often exchanged from a rep's own mailbox, so they are nowhere in the Sales
+    mailbox and Outlook's conversation for that email contains one item --
+    verified across all 79 folders of the Sales mailbox on 2026-08-10. The
+    quoted block travels inside the reply regardless.
+
+    Returns '' when the email quotes nothing (a first-contact inquiry).
+    Tracking URLs and banners are stripped, but the exchange itself is left
+    alone: it is being shown to a person to read, not summarised.
+    """
+    if not text:
+        return ''
+
+    # Same three markers clean_email_body() truncates at, earliest wins. The
+    # automated-footer pattern is deliberately not among them -- vendor
+    # boilerplate is not thread history.
+    start = None
+    for pattern in (_QUOTE_HEADER_RE, _ON_WROTE_RE, _ORIGINAL_MESSAGE_RE):
+        match = pattern.search(text)
+        if match and (start is None or match.start() < start):
+            start = match.start()
+    if start is None:
+        return ''
+
+    quoted = text[start:]
+    # Each quoted message down the chain carries its own gateway banner.
+    quoted = strip_security_banners(quoted)
+    quoted = _MAILTO_RE.sub('', quoted)
+    quoted = _LONG_BRACKETED_URL_RE.sub('', quoted)
+    lines = [
+        ln for ln in quoted.split('\n')
+        if not _STANDALONE_URL_RE.match(ln.strip())
+    ]
+    lines = [re.sub(r'[ \t]{2,}', ' ', ln).rstrip() for ln in lines]
+    quoted = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()
+
+    if len(quoted) > max_chars:
+        quoted = quoted[:max_chars].rstrip() + '\n\n[... rest of the thread not shown ...]'
+    return quoted
+
+
+def compact_for_ai(text, max_chars=20000):
+    """
+    Strip an email down to what is worth paying a model to read.
+
+    Deliberately NOT clean_email_body(). That one is built for a human
+    reader and throws away two things the extractor needs:
+
+      * quoted reply history -- a reply's contact details frequently exist
+        *only* in the quoted original ("RE: HOT RFQ" yielded its company and
+        email that way, and nowhere else);
+      * the contact half of a form submission, which is redundant on screen
+        because it is already parsed into fields, but is exactly what the
+        extractor is being asked to find.
+
+    Measured over 92 cached emails, what is removed here -- tracking and
+    redirect URLs, mailto duplicates, external-sender banners, legal
+    disclaimers, divider lines and repeated whitespace -- is the large
+    majority of the raw body, because these arrive as HTML flattened to text.
+
+    Over-long bodies keep their head and tail rather than just the head: the
+    new message sits at the top of a reply chain and the signature block with
+    the phone number sits at the bottom, so a plain truncation loses precisely
+    the contact details this exists to preserve.
+    """
+    if not text:
+        return text
+
+    # The duplicated preheader used to reach the extractor as though the sender
+    # had written their opening twice -- wasted tokens, and a second, truncated
+    # copy of the request for the model to reconcile against the real one.
+    text = strip_security_banners(text)
+    text = _MAILTO_RE.sub('', text)
+    text = _LONG_BRACKETED_URL_RE.sub('', text)
+
+    paragraphs = re.split(r'\n\s*\n', text)
+    kept = []
+    for p in paragraphs:
+        lowered = p.lower()
+        if len(p) > _DISCLAIMER_MIN_LEN and any(kw in lowered for kw in _DISCLAIMER_KEYWORDS):
+            continue
+        kept.append(p)
+    text = '\n\n'.join(kept)
+
+    lines = [
+        ln for ln in text.split('\n')
+        if not _STANDALONE_URL_RE.match(ln.strip()) and not _SEPARATOR_LINE_RE.match(ln)
+    ]
+    lines = [re.sub(r'[ \t]{2,}', ' ', ln).rstrip() for ln in lines]
+    text = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()
+
+    if max_chars and len(text) > max_chars:
+        head = int(max_chars * 0.7)
+        tail = max_chars - head
+        text = (
+            f'{text[:head]}\n\n[... {len(text) - max_chars:,} characters of quoted '
+            f'thread omitted ...]\n\n{text[-tail:]}'
+        )
+    return text
 
 
 def condense_paragraphs(text):

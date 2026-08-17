@@ -1,0 +1,134 @@
+{% extends 'base.html' %}
+{% block title %}Lead Lifetime{% endblock %}
+{% block content %}
+<style>
+  .lifecycle-head { display:flex; justify-content:space-between; gap:1rem; align-items:start; margin-bottom:1rem; }
+  .lifecycle-head p { margin:.15rem 0; color:var(--text-muted); }
+  .facts { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.7rem; margin-top:.9rem; }
+  .fact { background:var(--surface-2); border-radius:8px; padding:.75rem; }
+  .fact span { display:block; color:var(--text-muted); font-size:.7rem; text-transform:uppercase; font-weight:700; }
+  .fact strong { display:block; margin-top:.2rem; overflow-wrap:anywhere; }
+  .timeline { list-style:none; padding:0; margin:1rem 0 0; }
+  .timeline li { position:relative; padding:0 0 1.1rem 1.5rem; border-left:2px solid var(--border); margin-left:.35rem; }
+  .timeline li::before { content:''; position:absolute; width:10px; height:10px; border-radius:50%; background:var(--orange); left:-6px; top:.25rem; }
+  .timeline time { display:block; color:var(--text-muted); font-size:.74rem; }
+  .opty { border-top:1px solid var(--border); padding:.8rem 0; display:grid; grid-template-columns:2fr repeat(4,1fr); gap:.7rem; }
+  .opty:first-of-type { margin-top:.7rem; } .opty span { display:block; color:var(--text-muted); font-size:.7rem; text-transform:uppercase; }
+  .submitted-sections { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; margin-top:.9rem; }
+  .submitted-section { background:var(--surface-2); border-radius:8px; padding:.85rem; min-width:0; }
+  .submitted-section.wide { grid-column:1/-1; }
+  .submitted-section h4 { margin:0 0 .55rem; color:var(--navy); }
+  .submitted-fields { display:grid; grid-template-columns:minmax(110px,.7fr) minmax(0,1.3fr); gap:.35rem .75rem; margin:0; }
+  .submitted-fields dt { color:var(--text-muted); font-size:.75rem; font-weight:700; }
+  .submitted-fields dd { margin:0; overflow-wrap:anywhere; white-space:pre-wrap; }
+  .payload-table { width:100%; border-collapse:collapse; font-size:.82rem; }
+  .payload-table td { padding:.4rem; border-bottom:1px solid var(--border); vertical-align:top; overflow-wrap:anywhere; }
+  .payload-table td:first-child { width:38%; color:var(--text-muted); font-weight:700; }
+  @media(max-width:760px){.facts{grid-template-columns:repeat(2,1fr)}.opty{grid-template-columns:1fr 1fr}.lifecycle-head{display:block}.submitted-sections{grid-template-columns:1fr}.submitted-section.wide{grid-column:auto}}
+</style>
+<div class="lifecycle-head">
+  <div><h2>{{ (lead.first_name or '') ~ ' ' ~ (lead.last_name or '') }}</h2><p>{{ lead.organization or lead.email or 'Lead #' ~ lead.id }}</p></div>
+  <a class="btn btn-secondary" href="{{ url_for('status') }}">Back to performance</a>
+</div>
+
+<section class="card">
+  <h3>Current outcome</h3>
+  <div class="facts">
+    <div class="fact"><span>Local status</span><strong>{{ lead.status|replace('_',' ')|title }}</strong></div>
+    <div class="fact"><span>Oracle status</span><strong>{{ snapshot.oracle_status if snapshot else 'Not synced' }}</strong></div>
+    <div class="fact"><span>Qualified</span><strong>{{ snapshot.qualified_at[:10] if snapshot and snapshot.qualified_at else 'No' }}</strong></div>
+    <div class="fact"><span>Converted</span><strong>{{ 'Yes' if opportunities or (snapshot and snapshot.converted_at) else 'No' }}</strong></div>
+    <div class="fact"><span>Oracle lead</span><strong>{{ snapshot.oracle_lead_number if snapshot else lead.oracle_record_id or '—' }}</strong></div>
+    <div class="fact"><span>Owner</span><strong>{{ snapshot.oracle_owner if snapshot and snapshot.oracle_owner else lead.assigned_tm or '—' }}</strong></div>
+    <div class="fact"><span>Qualification score</span><strong>{{ snapshot.qualification_score if snapshot and snapshot.qualification_score is not none else '—' }}</strong></div>
+    <div class="fact"><span>Last synced</span><strong>{{ snapshot.last_synced_at[:16]|replace('T',' ') if snapshot else '—' }}</strong></div>
+  </div>
+  {% if snapshot and snapshot.sync_error %}<p class="meta" style="color:var(--danger)">Latest sync error: {{ snapshot.sync_error }}</p>{% endif %}
+</section>
+
+<section class="card">
+  <h3>Lead information submitted to Oracle</h3>
+  {% if submitted_payload %}
+    <p class="meta">Exact final REST request saved when this lead was submitted.</p>
+    <table class="payload-table">
+      {% for field, value in submitted_payload|dictsort %}
+        <tr><td>{{ field }}</td><td>{{ value }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="meta">Submission source values retained for this older lead. Exact REST request capture was added for new submissions.</p>
+    <div class="submitted-sections">
+      <div class="submitted-section">
+        <h4>Oracle lead</h4>
+        <dl class="submitted-fields">
+          <dt>Lead name</dt><dd>{{ lead.oracle_project_name or '—' }}</dd>
+          <dt>Oracle ID</dt><dd>{{ lead.oracle_record_id or '—' }}</dd>
+          <dt>Lead number</dt><dd>{{ snapshot.oracle_lead_number if snapshot and snapshot.oracle_lead_number else '—' }}</dd>
+          <dt>Source</dt><dd>Website</dd>
+          <dt>Owner</dt><dd>{{ lead.assigned_tm or '—' }}</dd>
+          <dt>Market</dt><dd>{{ lead.market or '—' }}</dd>
+          <dt>Rank</dt><dd>{{ lead.rank or '—' }}</dd>
+        </dl>
+      </div>
+      <div class="submitted-section">
+        <h4>Contact and company</h4>
+        <dl class="submitted-fields">
+          <dt>Name</dt><dd>{{ (lead.first_name or '') ~ ' ' ~ (lead.last_name or '') }}</dd>
+          <dt>Title</dt><dd>{{ lead.title or '—' }}</dd>
+          <dt>Email</dt><dd>{{ lead.email or '—' }}</dd>
+          <dt>Phone</dt><dd>{{ lead.phone or lead.phone_mobile or '—' }}</dd>
+          <dt>Company</dt><dd>{{ lead.organization or '—' }}</dd>
+          <dt>Website</dt><dd>{{ lead.website or '—' }}</dd>
+        </dl>
+      </div>
+      <div class="submitted-section">
+        <h4>Location</h4>
+        <dl class="submitted-fields">
+          <dt>Address 1</dt><dd>{{ lead.address1 or '—' }}</dd>
+          <dt>Address 2</dt><dd>{{ lead.address2 or '—' }}</dd>
+          <dt>City</dt><dd>{{ lead.city or '—' }}</dd>
+          <dt>State / province</dt><dd>{{ lead.state or '—' }}</dd>
+          <dt>Postal code</dt><dd>{{ lead.zip or '—' }}</dd>
+          <dt>Country</dt><dd>{{ lead.country or '—' }}</dd>
+        </dl>
+      </div>
+      <div class="submitted-section">
+        <h4>Source context</h4>
+        <dl class="submitted-fields">
+          <dt>Campaign</dt><dd>{{ lead.campaign or '—' }}</dd>
+          <dt>Requested action</dt><dd>{{ lead.notes_action or '—' }}</dd>
+          <dt>Qualifiers</dt><dd>{{ lead.qualifiers or '—' }}</dd>
+          <dt>Survey answers</dt><dd>{{ lead.survey_answers or '—' }}</dd>
+        </dl>
+      </div>
+      <div class="submitted-section wide">
+        <h4>Lead details / Oracle description</h4>
+        <div style="white-space:pre-wrap">{{ lead.lead_details or lead.notes_body or '—' }}</div>
+      </div>
+    </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h3>Lifetime</h3>
+  <ol class="timeline">
+    <li><strong>Lead received</strong><time>{{ lead.created_at|replace('T',' ') }}</time></li>
+    {% if lead.reviewed_at %}<li><strong>{{ 'Lead rejected' if lead.status == 'rejected' else 'Lead approved' }}</strong><time>{{ lead.reviewed_at|replace('T',' ') }}</time></li>{% endif %}
+    {% if lead.submitted_at %}<li><strong>Sent to Oracle</strong><time>{{ lead.submitted_at|replace('T',' ') }}</time></li>{% endif %}
+    {% for event in events %}<li><strong>{{ event.title }}</strong>{% if event.detail %}<div class="meta">{{ event.detail }}</div>{% endif %}<time>{{ event.event_at|replace('T',' ') }}</time></li>{% endfor %}
+  </ol>
+</section>
+
+<section class="card">
+  <h3>Oracle opportunities</h3>
+  {% for opportunity in opportunities %}
+    <div class="opty" style="grid-template-columns:2fr repeat(3,1fr)">
+      <div><span>Opportunity</span><strong>{{ opportunity.name or opportunity.opportunity_number }}</strong><small class="meta">{{ opportunity.opportunity_number }}</small></div>
+      <div><span>Status</span><strong>{{ opportunity.status or '—' }}</strong></div>
+      <div><span>Stage</span><strong>{{ opportunity.sales_stage or '—' }}</strong></div>
+      <div><span>Win probability</span><strong>{{ opportunity.win_probability|string ~ '%' if opportunity.win_probability is not none else '—' }}</strong></div>
+    </div>
+  {% else %}<p class="meta">No converted opportunities have been returned by Oracle.</p>{% endfor %}
+</section>
+
+{% endblock %}

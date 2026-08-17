@@ -10,6 +10,25 @@ on 2026-07-20. See territory_reference_raw.txt for a plain-text dump of the same
 This superseded an earlier copy/paste of the same table that lost its row/column
 structure -- notably, that earlier attempt had Israel and Austria under Serdar Eren;
 the real table puts both under Davide Amato. Trust this file, not memory of the paste.
+
+The same sheet now sits in reference/TM_Territories.pdf, on the dashboard's
+Reference tab. It is a scan with no text layer, so it cannot be parsed -- the
+tables below are a transcription, and tests/test_territory_assignment.py
+transcribes it a second time, independently, and asserts the two agree. When
+the sheet is reissued, update both: a change made in only one place fails the
+tests rather than quietly routing leads to the wrong rep.
+
+KNOWN DIVERGENCE FROM THAT PDF -- deliberate, do not "correct" it back:
+  * 2026-08-10: Lisa Wolf left the company. The Americas (non-US/Canada) list
+    below is now John Pan. The PDF still reads Lisa Wolf, and being a scan it
+    cannot be edited here, so the code is deliberately ahead of it until the
+    sheet is reissued.
+  * 2026-08-14: Daniel Smoliga was replaced by John Pan, who now holds the
+    NORTHEAST territory (US states, the eastern Canadian provinces, and the
+    upper half of the Pennsylvania ZIP split) in addition to the Americas list
+    above. The PDF still reads Daniel Smoliga. One person holding two regions
+    is intentional -- do not merge the two into a single block, they are
+    separate rows on the sheet and can be reassigned separately.
 """
 
 # --- International: country name (lowercased) -> TM ---
@@ -73,14 +92,14 @@ COUNTRY_TO_TM = {
     'pakistan': 'Sam Tam', 'philippines': 'Sam Tam', 'singapore': 'Sam Tam',
     'sri lanka': 'Sam Tam', 'thailand': 'Sam Tam', 'vietnam': 'Sam Tam',
 
-    # Americas (non-US/Canada) - Lisa Wolf
-    'mexico': 'Lisa Wolf', 'guatemala': 'Lisa Wolf', 'nicaragua': 'Lisa Wolf',
-    'costa rica': 'Lisa Wolf', 'cuba': 'Lisa Wolf', 'dominican republic': 'Lisa Wolf',
-    'puerto rico': 'Lisa Wolf', 'colombia': 'Lisa Wolf', 'ecuador': 'Lisa Wolf',
-    'peru': 'Lisa Wolf', 'guyana': 'Lisa Wolf', 'suriname': 'Lisa Wolf',
-    'french guiana': 'Lisa Wolf', 'brazil': 'Lisa Wolf', 'bolivia': 'Lisa Wolf',
-    'chile': 'Lisa Wolf', 'paraguay': 'Lisa Wolf', 'argentina': 'Lisa Wolf',
-    'uruguay': 'Lisa Wolf',
+    # Americas (non-US/Canada) - John Pan
+    'mexico': 'John Pan', 'guatemala': 'John Pan', 'nicaragua': 'John Pan',
+    'costa rica': 'John Pan', 'cuba': 'John Pan', 'dominican republic': 'John Pan',
+    'puerto rico': 'John Pan', 'colombia': 'John Pan', 'ecuador': 'John Pan',
+    'peru': 'John Pan', 'guyana': 'John Pan', 'suriname': 'John Pan',
+    'french guiana': 'John Pan', 'brazil': 'John Pan', 'bolivia': 'John Pan',
+    'chile': 'John Pan', 'paraguay': 'John Pan', 'argentina': 'John Pan',
+    'uruguay': 'John Pan',
 }
 
 # --- Domestic: US states ---
@@ -88,12 +107,12 @@ COUNTRY_TO_TM = {
 # (by ZIP or county) rather than being one state -> TM entry -- handled as special
 # cases in assign_tm() below, not in this dict.
 US_STATE_TO_TM = {
-    # Daniel Smoliga (NORTHEAST)
-    'connecticut': 'Daniel Smoliga', 'delaware': 'Daniel Smoliga',
-    'massachusetts': 'Daniel Smoliga', 'maine': 'Daniel Smoliga',
-    'new hampshire': 'Daniel Smoliga', 'new jersey': 'Daniel Smoliga',
-    'new york': 'Daniel Smoliga', 'rhode island': 'Daniel Smoliga',
-    'vermont': 'Daniel Smoliga',
+    # John Pan (NORTHEAST) -- took over from Daniel Smoliga on 2026-08-14
+    'connecticut': 'John Pan', 'delaware': 'John Pan',
+    'massachusetts': 'John Pan', 'maine': 'John Pan',
+    'new hampshire': 'John Pan', 'new jersey': 'John Pan',
+    'new york': 'John Pan', 'rhode island': 'John Pan',
+    'vermont': 'John Pan',
 
     # Brian Carter (WEST)
     'alaska': 'Brian Carter', 'colorado': 'Brian Carter', 'hawaii': 'Brian Carter',
@@ -124,10 +143,10 @@ US_STATE_TO_TM = {
 # New Brunswick and Prince Edward Island aren't in the source table at all -- left
 # out rather than guessed. Keyed by both postal abbreviation and full name.
 CANADA_PROVINCE_TO_TM = {
-    # Daniel Smoliga (NORTHEAST)
-    'nl': 'Daniel Smoliga', 'newfoundland and labrador': 'Daniel Smoliga',
-    'ns': 'Daniel Smoliga', 'nova scotia': 'Daniel Smoliga',
-    'qc': 'Daniel Smoliga', 'quebec': 'Daniel Smoliga',
+    # John Pan (NORTHEAST) -- took over from Daniel Smoliga on 2026-08-14
+    'nl': 'John Pan', 'newfoundland and labrador': 'John Pan',
+    'ns': 'John Pan', 'nova scotia': 'John Pan',
+    'qc': 'John Pan', 'quebec': 'John Pan',
 
     # Brian Carter (WEST)
     'ab': 'Brian Carter', 'alberta': 'Brian Carter',
@@ -160,7 +179,18 @@ US_STATE_ABBR = {
 
 # ZIP-code / county splits called out explicitly in the source table.
 _CA_SOUTHERN_MAX_ZIP = 93599   # <= this -> Jeff Frederick (Southern CA), else -> Brian Carter (West)
-_PA_ROST_MAX_ZIP = 16999       # <= this -> Bill Rost, else -> Daniel Smoliga
+_PA_ROST_MAX_ZIP = 16999       # <= this -> Bill Rost, else -> John Pan (Northeast)
+
+# The ZIP ranges those two states actually occupy. Only these two states are
+# split by ZIP, so only these two can be misrouted by a ZIP that does not
+# belong to the state -- and a lead arrived with state "Pennsylvania" and ZIP
+# 38133 (Bartlett, Tennessee), which the split rule would have handed to the
+# Northeast rep with no sign anything was wrong. When they disagree, neither
+# value can be trusted, so the lead goes to a human instead.
+_STATE_ZIP_RANGES = {
+    'california': (90000, 96199),
+    'pennsylvania': (15000, 19699),
+}
 
 # Las Vegas-metro ZIP3 prefixes -- a heuristic for Clark County, NV, not an
 # authoritative county lookup (the source table only names the county, not ZIPs).
@@ -177,8 +207,167 @@ def _zip5(raw_zip):
     return digits[:5] if len(digits) >= 5 else None
 
 
+# ---------------------------------------------------------------------------
+# Customer Relationship Rep (CRR) -- reference only
+#
+# Who to talk to about a lead, shown on the dashboard and deliberately NEVER
+# sent to Oracle: Oracle's Owner is the TM above. Transcribed from
+# reference/Sales_List.pdf, whose MR/TM column was checked row by row against
+# the TM tables above -- all 29 rows of its second page agreed, which is what
+# makes the row alignment trustworthy.
+#
+# The sheet has no EMEA or Asia table. Keaton supplied the EMEA rule directly
+# on 2026-08-10: everything EMEA is Elif, except Serdar Eren's territory,
+# which is Sandra.
+# ---------------------------------------------------------------------------
+
+US_STATE_TO_CRR = {
+    # Left-hand column of Sales_List.pdf page 1
+    'alaska': 'Teresa Meier', 'alabama': 'Teresa Meier', 'arkansas': 'Barbara Stubbs',
+    'arizona': 'Trinidad Bivian', 'colorado': 'Teresa Meier',
+    'connecticut': 'Claudine Allen', 'delaware': 'Claudine Allen',
+    'florida': 'Teresa Meier', 'georgia': 'Teresa Meier', 'hawaii': 'Teresa Meier',
+    'iowa': 'Barbara Stubbs', 'idaho': 'Teresa Meier', 'illinois': 'Barbara Stubbs',
+    'indiana': 'Alicia Sabillon', 'kansas': 'Barbara Stubbs', 'kentucky': 'Alicia Sabillon',
+    'louisiana': 'Barbara Stubbs', 'massachusetts': 'Claudine Allen',
+    'maryland': 'Claudine Allen', 'maine': 'Claudine Allen', 'michigan': 'Alicia Sabillon',
+    'minnesota': 'Barbara Stubbs', 'missouri': 'Barbara Stubbs',
+    'mississippi': 'Teresa Meier', 'montana': 'Teresa Meier',
+    'north carolina': 'Teresa Meier',
+
+    # Right-hand column, whose reps are on page 3
+    'north dakota': 'Teresa Meier', 'nebraska': 'Trinidad Bivian',
+    'new hampshire': 'Claudine Allen', 'new jersey': 'Claudine Allen',
+    'new mexico': 'Barbara Stubbs', 'new york': 'Claudine Allen',
+    'ohio': 'Alicia Sabillon', 'oklahoma': 'Barbara Stubbs', 'oregon': 'Teresa Meier',
+    # Both halves of Pennsylvania are Claudine Allen, unlike the TM split.
+    'pennsylvania': 'Claudine Allen',
+    'rhode island': 'Claudine Allen', 'south carolina': 'Teresa Meier',
+    'south dakota': 'Teresa Meier', 'tennessee': 'Alicia Sabillon',
+    'texas': 'Barbara Stubbs', 'utah': 'Teresa Meier', 'virginia': 'Claudine Allen',
+    'vermont': 'Claudine Allen', 'washington': 'Teresa Meier',
+    'wisconsin': 'Barbara Stubbs', 'west virginia': 'Claudine Allen',
+    'wyoming': 'Teresa Meier',
+}
+
+CANADA_PROVINCE_TO_CRR = {
+    # "Canada West: AB, BC, & SK"
+    'ab': 'Teresa Meier', 'alberta': 'Teresa Meier',
+    'bc': 'Teresa Meier', 'british columbia': 'Teresa Meier',
+    'sk': 'Teresa Meier', 'saskatchewan': 'Teresa Meier',
+    # "Mid Canada: MB & NU"
+    'mb': 'Claudine Allen', 'manitoba': 'Claudine Allen',
+    'nu': 'Claudine Allen', 'nunavut': 'Claudine Allen',
+    # "Eastern Canada: ON" and "NB, NL, NS, QC, PEI"
+    'on': 'Claudine Allen', 'ontario': 'Claudine Allen',
+    'nb': 'Claudine Allen', 'new brunswick': 'Claudine Allen',
+    'nl': 'Claudine Allen', 'newfoundland and labrador': 'Claudine Allen',
+    'ns': 'Claudine Allen', 'nova scotia': 'Claudine Allen',
+    'qc': 'Claudine Allen', 'quebec': 'Claudine Allen',
+    'pei': 'Claudine Allen', 'pe': 'Claudine Allen', 'prince edward island': 'Claudine Allen',
+    # NWT and Yukon are not on the sales list, though they are on the TM sheet.
+}
+
+# "CRR SPECIAL ASSIGNMENTS", page 2 of the sales list.
+_CRR_PUERTO_RICO = 'Trinidad Bivian'
+_CRR_LATIN_AMERICA = 'Alicia Sabillon'
+
+# EMEA and Asia, per Keaton on 2026-08-10. The sales list has no table for
+# either region. "Sandra van der Maat" was confirmed by him as the right
+# Sandra (she is the BV Office entry on the list); "Elif" appears on no sheet
+# here, so it is recorded exactly as given.
+_CRR_EMEA_DEFAULT = 'Elif'
+_CRR_EMEA_SERDAR = 'Sandra van der Maat'
+_EMEA_TMS = {'Davide Amato', 'Marcus James', 'Ralph Delcourt', 'Serdar Eren'}
+_SERDAR = 'Serdar Eren'
+
+# Asia is Alan Lam throughout -- including the Oceania countries (Australia,
+# New Zealand), which the territory sheet files under its Asia section with
+# Sam Tam rather than giving them a region of their own.
+_CRR_ASIA = 'Alan Lam'
+_ASIA_TMS = {'Alan Lam', 'Nozomi Kato', 'Sam Tam'}
+
+# Derived from COUNTRY_TO_TM only, never from the US/Canada tables: John Pan
+# holds the Northeast as well as the Americas, and a New York lead is not a
+# Latin America lead.
+_LATIN_AMERICA_COUNTRIES = {
+    country for country, tm in COUNTRY_TO_TM.items() if tm == 'John Pan'
+} | {'puerto rico'}
+
+
+def assign_crr(lead, tm=None):
+    """
+    Return (crr_name, basis) -- the sales person to talk to about this lead.
+
+    Reference only. Oracle's Owner is the TM from assign_tm(); this never
+    reaches Oracle, and is computed for display rather than stored so it
+    cannot leak into a submission payload by accident.
+
+    `tm` is the already-assigned Territory Manager, which is what decides the
+    EMEA cases: the sales list has no EMEA table, and the rule is defined in
+    terms of whose territory it is.
+    """
+    country = (lead.get('country') or '').strip().lower()
+    state_raw = (lead.get('state') or '').strip()
+    zip5 = _zip5(lead.get('zip'))
+
+    if country == 'puerto rico':
+        return _CRR_PUERTO_RICO, 'Puerto Rico'
+    if country in _LATIN_AMERICA_COUNTRIES:
+        return _CRR_LATIN_AMERICA, f'{country.title()} (Mexico, Central and South America)'
+
+    if tm in _EMEA_TMS:
+        if tm == _SERDAR:
+            return _CRR_EMEA_SERDAR, f'EMEA, {_SERDAR}'
+        return _CRR_EMEA_DEFAULT, f'EMEA, {tm}'
+
+    if tm in _ASIA_TMS:
+        return _CRR_ASIA, f'Asia, {tm}'
+
+    if not country or country in _US_COUNTRY_NAMES:
+        if not state_raw:
+            return None, 'No state on file -- cannot determine the sales rep'
+        state = _normalize_us_state(state_raw)
+
+        if state == 'california':
+            if not zip5:
+                return None, 'California -- need a ZIP code to tell North from South'
+            if int(zip5) <= _CA_SOUTHERN_MAX_ZIP:
+                return 'Trinidad Bivian', f'California, ZIP {zip5} (<= {_CA_SOUTHERN_MAX_ZIP})'
+            return 'Teresa Meier', f'California, ZIP {zip5} (> {_CA_SOUTHERN_MAX_ZIP})'
+
+        if state == 'nevada':
+            # Same Clark County split as the TM sheet, and the same heuristic.
+            if zip5 and zip5[:3] in _CLARK_COUNTY_NV_ZIP3:
+                return 'Trinidad Bivian', f'Nevada, ZIP {zip5} (Las Vegas / Clark County)'
+            if not zip5:
+                return None, 'Nevada -- need a ZIP code to tell Clark County apart'
+            return 'Teresa Meier', f'Nevada, ZIP {zip5} (outside Clark County)'
+
+        crr = US_STATE_TO_CRR.get(state)
+        if crr:
+            return crr, f'US state: {state_raw}'
+        return None, f'US state "{state_raw}" is not on the sales list'
+
+    if country in _CANADA_COUNTRY_NAMES:
+        if not state_raw:
+            return None, 'Canada -- no province on file'
+        province = _normalize_us_state(state_raw)
+        crr = CANADA_PROVINCE_TO_CRR.get(province) or CANADA_PROVINCE_TO_CRR.get(
+            state_raw.strip().lower()
+        )
+        if crr:
+            return crr, f'Canada province: {state_raw}'
+        return None, f'Canadian province "{state_raw}" is not on the sales list'
+
+    return None, f'{country.title() or "This country"} is not on the sales list'
+
+
 def _normalize_us_state(state):
-    s = state.strip()
+    # Trailing punctuation and doubled spaces come straight from how people
+    # write addresses -- a real lead arrived with "Tn." and went unassigned
+    # because it matched neither "TN" nor "tennessee".
+    s = ' '.join(state.strip().strip('.,').split())
     if len(s) == 2 and s.upper() in US_STATE_ABBR:
         return US_STATE_ABBR[s.upper()].lower()
     return s.lower()
@@ -186,10 +375,18 @@ def _normalize_us_state(state):
 
 def assign_tm(lead):
     """
-    Return (tm_name, basis) for a lead.
-    Currently overridden per user request to set Owner to Keaton Kaess for all leads.
+    Return (tm_name, basis) for a lead, from the territory sheet.
+
+    `basis` names the rule that produced the answer ("Ohio", "California, ZIP
+    92610 (<= 93599)") so a reviewer can see why a lead landed with a
+    particular rep, and a None tm always comes with the reason it could not be
+    decided rather than a silent blank.
+
+    Until 2026-08-10 this returned Keaton Kaess unconditionally -- an override
+    added while the pipeline was being evaluated, which made every one of the
+    rules below dead code. Removing it is what turns territory assignment back
+    on; see reference/TM_Territories.pdf for the sheet it implements.
     """
-    return "Keaton Kaess", "Lead owner assigned to Keaton Kaess"
     country = (lead.get('country') or '').strip().lower()
     state_raw = (lead.get('state') or '').strip()
     zip5 = _zip5(lead.get('zip'))
@@ -198,6 +395,16 @@ def assign_tm(lead):
         if not state_raw:
             return None, 'No state on file -- cannot determine US territory'
         state = _normalize_us_state(state_raw)
+
+        # Only the ZIP-split states can be misrouted by a ZIP belonging to a
+        # different state, so that is the only place this is checked.
+        if state in _STATE_ZIP_RANGES and zip5:
+            low, high = _STATE_ZIP_RANGES[state]
+            if not low <= int(zip5) <= high:
+                return None, (
+                    f'State "{state_raw}" and ZIP {zip5} disagree -- {zip5} is not a '
+                    f'{state.title()} ZIP. Check the address before assigning.'
+                )
 
         if state == 'california':
             if not zip5:
@@ -211,7 +418,7 @@ def assign_tm(lead):
                 return None, 'Pennsylvania -- need a ZIP code to determine territory split'
             if int(zip5) <= _PA_ROST_MAX_ZIP:
                 return 'Bill Rost', f'Pennsylvania, ZIP {zip5} (<= {_PA_ROST_MAX_ZIP})'
-            return 'Daniel Smoliga', f'Pennsylvania, ZIP {zip5} (> {_PA_ROST_MAX_ZIP})'
+            return 'John Pan', f'Pennsylvania, ZIP {zip5} (> {_PA_ROST_MAX_ZIP})'
 
         if state == 'nevada':
             if not zip5:
@@ -247,8 +454,8 @@ if __name__ == '__main__':
         {'country': 'USA', 'state': 'OH'},
         {'country': 'USA', 'state': 'CA', 'zip': '90210'},   # LA -> Southern CA
         {'country': 'USA', 'state': 'CA', 'zip': '94105'},   # SF -> West
-        {'country': 'USA', 'state': 'PA', 'zip': '19102'},   # Philadelphia -> Bill Rost
-        {'country': 'USA', 'state': 'PA', 'zip': '15222'},   # Pittsburgh -> Daniel Smoliga
+        {'country': 'USA', 'state': 'PA', 'zip': '19102'},   # Philadelphia -> John Pan (Northeast)
+        {'country': 'USA', 'state': 'PA', 'zip': '15222'},   # Pittsburgh -> Bill Rost
         {'country': 'USA', 'state': 'NV', 'zip': '89101'},   # Las Vegas -> Clark County
         {'country': 'USA', 'state': 'NV', 'zip': '89501'},   # Reno -> not Clark County
         {'country': 'USA', 'state': 'NV'},                    # no zip -> manual review

@@ -5,7 +5,7 @@ Two layers, deliberately kept separate:
   1. Rule-based checks (deterministic, free, run first). Can set auto_reject=True,
      but ONLY for unambiguous junk. This is the sole path that skips human review;
      everything else always lands in pending_review for a person to decide.
-  2. An LLM plausibility pass (Claude). Adds labeled reasons and an advisory
+  2. An LLM plausibility pass (OpenAI). Adds labeled reasons and an advisory
      fraud_risk badge (clear/review/reject). It NEVER sets auto_reject itself --
      its "reject" verdict is just a strong visual flag in the dashboard, not a
      decision. This split is the core defense against prompt injection: nothing
@@ -204,13 +204,13 @@ def llm_plausibility_screen(lead, body_excerpt, provider=None):
     explanatory reason if the API key is missing or the call fails, since an
     unscreened lead should default to caution, not silently pass as clear.
     
-    `provider` can be 'claude', 'gemini', or None (auto-detected).
+    `provider` is retained for compatibility; OpenAI is always used.
     """
     prov, api_key = ai_provider.get_ai_provider(provider)
     if not prov or not api_key:
         return {'fraud_risk': 'review', 'reasons': [
             {'tag': 'llm_screen_unavailable', 'label': 'AI plausibility check unavailable',
-             'detail': 'No AI API key set (ANTHROPIC_API_KEY / GEMINI_API_KEY) -- this lead has only been rule-screened.'}]}
+             'detail': 'No OpenAI API key set (OPENAI_API_KEY / CHATGPT_API) -- this lead has only been rule-screened.'}]}
 
     excerpt = (body_excerpt or '')[:2000]
 

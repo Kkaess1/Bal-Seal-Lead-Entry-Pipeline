@@ -1,0 +1,195 @@
+{% extends 'base.html' %}
+{% block title %}Reference{% endblock %}
+{% block content %}
+  <h2>Reference ({{ document_count }})</h2>
+
+  {% for message in get_flashed_messages(category_filter=['reference_success']) %}
+    <div class="forward-notice forward-notice-success" role="status">{{ message }}</div>
+  {% endfor %}
+  {% for message in get_flashed_messages(category_filter=['reference_error']) %}
+    <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
+  {% endfor %}
+
+  <form class="reference-upload" id="reference-upload-form" method="post"
+        action="{{ url_for('reference_upload') }}" enctype="multipart/form-data">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <div class="reference-upload-row">
+      <input type="file" id="reference-file" name="document" multiple
+             accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.pdf,.txt,.md,.csv">
+      <button type="submit" class="btn btn-approve">Add document</button>
+    </div>
+  </form>
+
+  {% if not document_count %}
+    <div class="empty-container">
+      <h3>No reference documents yet</h3>
+      <p class="meta">Add an image, PDF, or text file above.</p>
+    </div>
+  {% else %}
+    {% for folder, documents in sections %}
+      {% if folder %}
+        <h3 class="reference-section">{{ folder }}</h3>
+      {% endif %}
+      <div class="file-group">
+        {% for document in documents %}
+          {# One shared name keeps this an accordion: opening a document closes
+             the last one, so the page stays a list rather than a stack of
+             previews. #}
+          <details class="file-row" name="reference-documents">
+            <summary class="file-summary">
+              <span class="file-chevron" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"></path></svg>
+              </span>
+              <span class="file-icon" aria-hidden="true">
+                {% if document.kind == 'image' %}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                       stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                    <circle cx="9" cy="9" r="2"></circle>
+                    <path d="m21 15-4.5-4.5L7 20"></path>
+                  </svg>
+                {% elif document.kind == 'pdf' %}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                       stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <path d="M14 2v6h6"></path>
+                  </svg>
+                {% else %}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                       stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <path d="M14 2v6h6"></path>
+                    <path d="M9 13h6"></path>
+                    <path d="M9 17h4"></path>
+                  </svg>
+                {% endif %}
+              </span>
+              <span class="file-name">{{ document.filename }}</span>
+              <span class="file-meta">{{ document.size }}{% if document.updated %} &middot; {{ document.updated }}{% endif %}</span>
+            </summary>
+
+            <div class="file-preview">
+              {% if document.kind == 'image' %}
+                <a href="{{ url_for('reference_file', relpath=document.relpath) }}" target="_blank" rel="noopener">
+                  <img class="reference-image" src="{{ url_for('reference_file', relpath=document.relpath) }}"
+                       alt="{{ document.name }}" loading="lazy">
+                </a>
+              {% elif document.kind == 'pdf' %}
+                {# src is set when the row is opened: three PDFs loading behind
+                   collapsed rows is exactly the weight this list avoids. #}
+                <iframe class="reference-pdf" title="{{ document.name }}"
+                        data-src="{{ url_for('reference_file', relpath=document.relpath) }}"></iframe>
+              {% elif document.kind == 'text' and document.text %}
+                <pre class="reference-text">{{ document.text }}</pre>
+                {% if document.truncated %}
+                  <p class="meta">Shown truncated — open the file for the rest.</p>
+                {% endif %}
+              {% else %}
+                <p class="meta">This file type is not shown on the page.</p>
+              {% endif %}
+
+              <div class="actions file-actions" style="margin-top: 0.75rem;">
+                <a class="btn btn-secondary" href="{{ url_for('reference_file', relpath=document.relpath) }}"
+                   target="_blank" rel="noopener">
+                  {% if document.kind in ('image', 'pdf') %}Open full size{% else %}Download{% endif %}
+                </a>
+                <form method="post" action="{{ url_for('reference_delete') }}"
+                      class="file-delete-form" style="display:inline;">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="relpath" value="{{ document.relpath }}">
+                  <button type="submit" class="btn-reject"
+                          data-filename="{{ document.filename }}">Delete</button>
+                </form>
+              </div>
+            </div>
+          </details>
+        {% endfor %}
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  <script>
+    (function() {
+      // Deleting a document removes a file for good, so confirm by name.
+      document.querySelectorAll('.file-delete-form').forEach(function(form) {
+        form.addEventListener('submit', function(event) {
+          var name = form.querySelector('button').dataset.filename;
+          if (!window.confirm('Delete ' + name + '? This removes the file.')) {
+            event.preventDefault();
+          }
+        });
+      });
+    })();
+
+    (function() {
+      // Load a PDF the first time its row is opened, not on page load.
+      document.querySelectorAll('.file-row').forEach(function(row) {
+        row.addEventListener('toggle', function() {
+          if (!row.open) return;
+          var frame = row.querySelector('iframe[data-src]');
+          if (frame) {
+            frame.src = frame.dataset.src;
+            frame.removeAttribute('data-src');
+          }
+        });
+      });
+    })();
+
+    (function() {
+      var form = document.getElementById('reference-upload-form');
+      var picker = document.getElementById('reference-file');
+      if (!form || !picker) return;
+
+      var upload = function(files, nameHint) {
+        if (!files || !files.length) return;
+        var data = new FormData();
+        data.append('_csrf_token', form.querySelector('[name=_csrf_token]').value);
+        for (var i = 0; i < files.length; i++) {
+          // A pasted screenshot arrives as "image.png" every time, which would
+          // stack up as "image (2).png", "image (3).png". Stamp it instead.
+          data.append('document', files[i], nameHint ? nameHint(files[i], i) : files[i].name);
+        }
+        fetch(form.action, {method: 'POST', body: data})
+          .then(function() { window.location.reload(); })
+          .catch(function() { window.location.reload(); });
+      };
+
+      var stamp = function(file) {
+        var now = new Date();
+        var pad = function(n) { return String(n).padStart(2, '0'); };
+        var extension = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        return 'screenshot ' + now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' +
+               pad(now.getDate()) + ' ' + pad(now.getHours()) + pad(now.getMinutes()) +
+               pad(now.getSeconds()) + '.' + extension;
+      };
+
+      ['dragenter', 'dragover'].forEach(function(name) {
+        form.addEventListener(name, function(event) {
+          event.preventDefault();
+          form.classList.add('reference-upload-active');
+        });
+      });
+      ['dragleave', 'drop'].forEach(function(name) {
+        form.addEventListener(name, function() {
+          form.classList.remove('reference-upload-active');
+        });
+      });
+      form.addEventListener('drop', function(event) {
+        event.preventDefault();
+        upload(event.dataTransfer.files);
+      });
+
+      // Paste anywhere on the page: the whole point is that a screenshot goes
+      // from Win+Shift+S to the reference page without ever becoming a file
+      // somebody has to find.
+      document.addEventListener('paste', function(event) {
+        var files = event.clipboardData && event.clipboardData.files;
+        if (files && files.length) {
+          event.preventDefault();
+          upload(files, stamp);
+        }
+      });
+    })();
+  </script>
+{% endblock %}

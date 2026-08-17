@@ -14,6 +14,7 @@ Usage:  py pipeline_ingest.py
 import argparse
 import hashlib
 import logging
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -27,7 +28,9 @@ import email_cleaner
 import email_translator
 import excel_parser
 import fraud_screen
+import hq_lookup
 import lead_extractor
+import location_enrichment
 import outlook_ingest
 import review_marking
 import territory_map
@@ -110,6 +113,8 @@ def _screen_and_stage(lead_id, lead, sender_email, subject=None, is_followup=Fal
     """Territory assignment + fraud screening for a lead that's already been
     inserted. All leads are staged in pending_review so the human user can review them."""
     tm, basis = territory_map.assign_tm(lead)
+    if tm and lead.get('_location_source'):
+        basis = f"{basis}; location from {lead['_location_source']}"
     db.set_territory_assignment(lead_id, tm, basis)
 
     result = fraud_screen.screen_lead(
@@ -119,8 +124,16 @@ def _screen_and_stage(lead_id, lead, sender_email, subject=None, is_followup=Fal
     )
     risk_level = 'reject' if result['auto_reject'] else result['fraud_risk']
     db.set_fraud_screen_result(lead_id, risk_level, result['fraud_reasons'], result['fraud_score'])
-    db.update_lead_fields(lead_id, {'status': 'pending_review'})
-    logger.info(f'  Lead {lead_id}: staged for review (risk={risk_level})')
+    # Only from a mid-ingest status: a reviewer can see and act on this lead
+    # while the screening above runs, and a blind write here would undo an
+    # approval made in that window. See db.finish_ingest().
+    if db.finish_ingest(lead_id):
+        logger.info(f'  Lead {lead_id}: staged for review (risk={risk_level})')
+    else:
+        logger.info(
+            f'  Lead {lead_id}: screened (risk={risk_level}); left as-is, a '
+            'reviewer has already moved it on.'
+        )
 
 
 def _fill_website(lead):
@@ -164,9 +177,15 @@ def _process_excel_attachment(message_row_id, path, sender_email, subject=None, 
 def _process_body_text(message_row_id, msg, force=False):
     """AI-extraction path for messages without an Excel attachment.
     Always inserts a lead record so every email is visible on the dashboard for human review."""
+    # Compacted, not cleaned: strips tracking URLs, banners, disclaimers and
+    # repeated whitespace, but keeps the quoted thread and a form's contact
+    # rows -- a reply's company and email frequently exist only there. Across
+    # 92 cached emails this is ~74% fewer characters than the raw body, almost
+    # all of it HTML flattened to text. See email_cleaner.compact_for_ai().
     extraction = lead_extractor.extract_lead(
         subject=msg['subject'], sender_email=msg['sender_email'],
-        sender_name=msg['sender_name'], body=msg['body_text'],
+        sender_name=msg['sender_name'],
+        body=email_cleaner.compact_for_ai(msg['body_text']),
     )
 
     display_body = msg['body_text']
@@ -200,6 +219,20 @@ def _process_body_text(message_row_id, msg, force=False):
 
     lead['lead_details'] = email_cleaner.clean_email_body(display_body)
     _fill_website(lead)
+    # Never let a transient AI failure discard an address plainly present in
+    # the signature.  When there is truly no stated location, genuine leads
+    # (and unknowns caused by an extraction outage) get a conservative lookup
+    # against the company's own public website.
+    is_lead = extraction.get('is_lead') is not False
+    location_enrichment.enrich_location(
+        lead, body=msg.get('body_text'), research=is_lead,
+    )
+    # Last resort, and only for a lead that still has no geography at all:
+    # let a model browse the company's site for the head office. Costs an AI
+    # call and a handful of page fetches, so it runs after the two free
+    # readings above have both come up empty. See hq_lookup.py.
+    if is_lead:
+        hq_lookup.apply_headquarters(lead)
     _fill_market(lead)
     lead_id = db.insert_lead(
         lead, source='email_ai_extract', message_id=message_row_id,
@@ -267,6 +300,7 @@ def process_message(msg, force=False, ingest_batch_id=None):
         body_cache_path=body_cache_path, message_file_path=message_file_path,
         conversation_id=msg.get('conversation_id'),
         ingest_batch_id=ingest_batch_id,
+        recipients=msg.get('recipients'),
     )
     if message_row_id is not None:
         db.record_attachments(message_row_id, msg.get('attachments'))
@@ -282,6 +316,9 @@ def process_message(msg, force=False, ingest_batch_id=None):
         # earlier export attempt failed.
         if message_file_path and not existing.get('message_file_path'):
             db.set_message_file_path(message_row_id, message_file_path)
+        # Backfill for rows inserted before To/CC was captured.
+        if msg.get('recipients') is not None and existing.get('recipients') is None:
+            db.set_message_recipients(message_row_id, msg['recipients'])
         if existing['status'] == 'processed' and not force:
             return True
         if force:
@@ -305,15 +342,64 @@ def process_message(msg, force=False, ingest_batch_id=None):
             _process_body_text(message_row_id, msg, force=force)
 
         db.update_message_status(message_row_id, 'processed')
+        _capture_thread_context(msg)
+        # Green-tag the email now that its leads are safely stored -- after the
+        # status write, never before, so a message that failed part-way through
+        # stays untagged and gets picked up again. Best-effort by design: see
+        # review_marking.mark_email_ingested().
+        if review_marking.mark_email_ingested(msg['id']):
+            logger.info(f"  Marked {msg['subject']!r} green in Outlook (ingested).")
         return True
     except Exception as e:
         logger.exception(f"  Message {msg['id']} failed: {e}")
         db.update_message_status(message_row_id, 'error', error_detail=str(e))
         return False
-    # Note: the email is NOT marked in Outlook here anymore -- that now only
-    # happens once a human has approved/rejected every lead pulled from it,
-    # via dashboard/app.py's _maybe_mark_email_reviewed(). Ingestion alone
-    # (this function) doesn't mean it's been reviewed.
+
+
+def _capture_thread_context(msg):
+    """
+    Store the rest of this email's Outlook conversation, for reading only.
+
+    A reply arrives as its own message, but everything it replies to was
+    handled earlier and tagged green, so the pipeline skipped it and it is
+    nowhere in the database. The reviewer then gets a bare "RE: ..." and no
+    way to judge whether it needs forwarding.
+
+    Best-effort, like the green tag: the lead is already stored by this point,
+    and missing context is not worth failing a run over.
+    """
+    try:
+        siblings = outlook_ingest.conversation_messages(msg['id'])
+    except Exception as e:
+        logger.warning(f"  Could not read the conversation for {msg['subject']!r}: {e}")
+        return 0
+
+    # An item reached through the conversation reports a different EntryID
+    # than the one it was fetched with, so the message being ingested shows up
+    # in its own thread and cannot be recognised by id. Sender plus timestamp
+    # identifies it; both sides read the same COM values.
+    own_key = ((msg.get('received_at') or ''), (msg.get('sender_email') or '').lower())
+
+    stored = 0
+    for sibling in siblings:
+        key = ((sibling.get('received_at') or ''),
+               (sibling.get('sender_email') or '').lower())
+        if key == own_key:
+            continue
+        body = email_cleaner.clean_email_body(sibling.get('body_text') or '')
+        if db.record_thread_message(
+            sibling['id'],
+            conversation_id=sibling.get('conversation_id') or msg.get('conversation_id'),
+            received_at=sibling.get('received_at'),
+            sender_email=sibling.get('sender_email'),
+            sender_name=sibling.get('sender_name'),
+            subject=sibling.get('subject'),
+            body_text=body,
+        ):
+            stored += 1
+    if stored:
+        logger.info(f'  Kept {stored} earlier message(s) from this conversation for context.')
+    return stored
 
 
 def _message_from_row(row):
@@ -339,7 +425,6 @@ def _message_from_row(row):
 def retry_pending_messages():
     """Retry durable work left in new/error by a prior crash or transient error."""
     all_ok = True
-    retry_batch_ids = set()
     for row in db.list_messages(status=['new', 'error']):
         try:
             msg = _message_from_row(row)
@@ -349,17 +434,10 @@ def retry_pending_messages():
             all_ok = False
             continue
         all_ok = process_message(msg, ingest_batch_id=row.get('ingest_batch_id')) and all_ok
-        if row.get('ingest_batch_id'):
-            retry_batch_ids.add(row['ingest_batch_id'])
-    for batch_id in retry_batch_ids:
-        removed = db.consolidate_ingest_batch_threads(batch_id)
-        if removed:
-            logger.info('Consolidated %s older thread lead(s) from retry batch %s.',
-                        removed, batch_id)
     return all_ok
 
 
-def main():
+def _run_ingest():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--recent', type=int, default=None, metavar='N',
@@ -404,10 +482,6 @@ def main():
             msg, force=args.force, ingest_batch_id=ingest_batch_id,
         ) and all_ok
 
-    removed = db.consolidate_ingest_batch_threads(ingest_batch_id)
-    if removed:
-        logger.info('Consolidated %s older lead(s) from same-batch email threads.', removed)
-
     if not args.recent:
         if all_ok:
             outlook_ingest.commit_fetch_watermark()
@@ -420,6 +494,24 @@ def main():
         # a real scheduled cycle, and shouldn't look like one on /status.
         db.set_run_state('last_ingest_run_at', datetime.now(timezone.utc).isoformat())
     logger.info('Ingest run complete.')
+
+
+def main():
+    lease_token = os.getenv('PIPELINE_INGEST_LEASE_TOKEN')
+    if lease_token:
+        db.update_run_lease('job:manual_ingest', lease_token, 'running')
+    try:
+        _run_ingest()
+    except BaseException as exc:
+        if lease_token:
+            db.update_run_lease(
+                'job:manual_ingest', lease_token, 'failed',
+                f'{type(exc).__name__}: {exc}',
+            )
+        raise
+    else:
+        if lease_token:
+            db.update_run_lease('job:manual_ingest', lease_token, 'succeeded')
 
 
 if __name__ == '__main__':

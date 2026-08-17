@@ -32,7 +32,7 @@ from dotenv import load_dotenv
 import company_website
 import db
 import secrets_store
-from oracle_api import OracleApiError, OracleLeadApiClient
+from oracle_api import OracleApiError, OracleLeadApiClient, submission_blockers
 
 logger = logging.getLogger(__name__)
 LOG_DIR = Path(__file__).parent / 'logs'
@@ -131,7 +131,9 @@ def _attach_source_email(client, lead, oracle_id, result):
 
 def _run_api_submit(client, leads):
     """Full unattended submission through Oracle's REST API."""
-    results = {'ok': 0, 'fail': 0}
+    # 'returned' is counted apart from 'fail': nothing failed on Oracle's side,
+    # the lead simply came back for a correction and is waiting in the queue.
+    results = {'ok': 0, 'fail': 0, 'returned': 0}
     for lead in leads:
         if not db.claim_lead_for_submission(lead['id']):
             logger.info(
@@ -141,6 +143,20 @@ def _run_api_submit(client, leads):
 
         source_label, trade_show_name = _project_label(lead)
         label = f"{lead.get('organization') or '?'} - {lead.get('first_name') or ''} {lead.get('last_name') or ''}"
+
+        # Backstop. The dashboard refuses to approve a lead with any of these
+        # missing (see dashboard/app.py approve()), so reaching here means the
+        # data changed after approval. Every blocker is a field a human can
+        # correct, so the lead goes back to Pending Review with the reason
+        # attached rather than to History as 'failed', where it had to be found
+        # and manually returned before it could be fixed.
+        blockers = submission_blockers(lead)
+        if blockers:
+            detail = 'Submission blocked: ' + ' '.join(blockers)
+            db.return_lead_for_correction(lead['id'], detail)
+            logger.error(f'  Returned for correction, not submitted: {label} -- {detail}')
+            results['returned'] += 1
+            continue
 
         # Local duplicate guard, checked before Oracle is touched at all.
         # Oracle's own dedup query cannot see leads it has not yet assigned an
@@ -186,6 +202,7 @@ def _run_api_submit(client, leads):
                 result['project_name'],
                 oracle_record_id=oracle_id,
                 field_warnings=all_warnings or None,
+                oracle_payload=result.get('payload'),
             )
             if result.get('oracle_lead_number'):
                 logger.info(
@@ -199,12 +216,11 @@ def _run_api_submit(client, leads):
             results['ok'] += 1
         except OracleApiError as e:
             detail = str(e)
-            # None status_code = network/transport error (request never reached Oracle)
-            # -- treat the same as 5xx: schedule a retry.
-            # Only 4xx errors (where Oracle explicitly rejected the payload) are
-            # considered permanent failures that the human needs to fix.
-            is_client_error = e.status_code is not None and e.status_code < 500
-            if is_client_error:
+            # A transport failure after POST may mean Oracle created the lead
+            # but the response never reached us. Never retry that blindly.
+            if e.outcome_unknown:
+                db.mark_submission_unknown(lead['id'], detail)
+            elif e.status_code is not None and e.status_code < 500:
                 db.mark_lead_failed(lead['id'], detail)
             else:
                 db.schedule_lead_retry(lead['id'], detail)
@@ -251,7 +267,10 @@ def main():
     results = _run_api_submit(client, leads)
     db.set_run_state('oracle_session_status', 'api')
     db.set_run_state('last_submit_run_at', datetime.now(timezone.utc).isoformat())
-    logger.info(f"Submit run complete. {results['ok']} ok, {results['fail']} failed.")
+    logger.info(
+        f"Submit run complete. {results['ok']} ok, {results['fail']} failed, "
+        f"{results.get('returned', 0)} returned to the queue for correction."
+    )
 
 
 if __name__ == '__main__':

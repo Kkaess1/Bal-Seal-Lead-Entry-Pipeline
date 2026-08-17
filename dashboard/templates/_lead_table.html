@@ -20,7 +20,41 @@
   <tr><td>Email Date</td><td>{% if lead.received_date_formatted %}<strong>{{ lead.received_date_formatted }}</strong>{% else %}<span class="meta">Unknown</span>{% endif %}</td></tr>
   <tr>
     <td>Territory</td>
-    <td>{% if lead.assigned_tm %}{{ lead.assigned_tm }}{% else %}<span class="text-warn">Unassigned</span>{% endif %}</td>
+    <td>
+      {% if lead.assigned_tm %}
+        {{ lead.assigned_tm }}
+      {% else %}
+        <span class="text-warn">Unassigned</span>
+        {# The lookup that can answer "where is this company?" when the email
+           never said -- see hq_lookup.py. Offered only where it could help:
+           a lead still under review, with no manager yet. #}
+        {% if hq_lookup_enabled and lead.status in editable_statuses %}
+          <form method="post" action="{{ url_for('find_hq', lead_id=lead.id) }}"
+                class="hq-lookup-form" style="display:inline">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="next" value="{{ request.full_path if request.query_string else request.path }}">
+            <button type="submit" class="btn btn-secondary btn-inline"
+                    title="Look up the company's head office on the web and route the lead from it (takes up to a minute)">
+              Find HQ
+            </button>
+          </form>
+        {% endif %}
+      {% endif %}
+      {% if lead.assigned_tm_basis %}<span class="meta">&middot; {{ lead.assigned_tm_basis }}</span>{% endif %}
+    </td>
+  </tr>
+  <tr>
+    {# Reference only -- Oracle's Owner is the Territory Manager above. #}
+    <td>Sales Rep</td>
+    <td>
+      {% if lead.sales_rep %}
+        {{ lead.sales_rep }}
+        <span class="meta">&middot; {{ lead.sales_rep_basis }}</span>
+      {% else %}
+        <span class="text-warn">Unassigned</span>
+        {% if lead.sales_rep_basis %}<span class="meta">&middot; {{ lead.sales_rep_basis }}</span>{% endif %}
+      {% endif %}
+    </td>
   </tr>
   <tr>
     <td>Market</td>
@@ -45,70 +79,22 @@
   </tr>
   <tr>
     <td>Attachments</td>
-    <td>
-      {# Filenames are sender-controlled text. Jinja autoescaping renders them
-         inert, and nothing here links to a file: the attachments themselves
-         are never saved or served. See db.record_attachments. #}
-      {% if lead.attachments %}
-        {% for att in lead.attachments %}
-          <div>
-            {{ att.name }}
-            <span class="meta">&middot; {{ att.kind }}{% if att.size %} &middot; {{ att.size|filesizeformat }}{% endif %}</span>
-          </div>
-        {% endfor %}
-        <div class="meta" style="margin-top:0.25rem;">Open the source email in Outlook to view {{ 'them' if lead.attachments|length > 1 else 'it' }}.</div>
-      {% else %}
-        <span class="meta">None</span>
-      {% endif %}
-    </td>
+    <td>{% include '_lead_attachments.html' %}</td>
   </tr>
   <tr>
     <td>Details</td>
-    <td class="details-cell" style="word-break: break-word; overflow-wrap: anywhere; max-width: 600px;">
-      {% if lead.translated_from %}
+    {# whitespace-controlled: the cell is `white-space: pre-line`, so the
+       template's own newlines and indentation would otherwise render as blank
+       lines above the text. #}
+    <td class="details-cell">
+      {%- if lead.translated_from %}
         <div class="translation-notice">Translated from {{ lead.translated_from }} to English</div>
-      {% endif %}
-      {{ lead.details_flat or '—' }}
+      {%- endif %}
+      {{- lead.details_flat or '—' -}}
     </td>
   </tr>
 </table>
 
-{% if lead.email_thread and lead.email_thread|length > 1 %}
-<div class="followup-thread-section" style="margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 0.75rem;">
-  <div class="followup-banner" style="background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe; padding: 0.5rem 0.75rem; border-radius: 6px; font-weight: 600; font-size: 0.88rem; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
-    <span>📩 Follow-Up Email Received for <strong>{{ lead.display_name }}</strong>{% if lead.organization %} ({{ lead.organization }}){% endif %}</span>
-    <span style="font-size: 0.78rem; font-weight: 600; background: #c7d2fe; color: #1e1b4b; padding: 2px 8px; border-radius: 12px;">{{ lead.email_thread|length }} Messages</span>
-  </div>
-  
-  <details class="thread-dropdown" style="background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;">
-    <summary style="padding: 0.6rem 0.8rem; font-weight: 600; font-size: 0.88rem; cursor: pointer; user-select: none; background: var(--surface); color: var(--text);">
-      View Conversation Thread (Original & Follow-up Emails)
-    </summary>
-    <div class="thread-body-container" style="padding: 0.75rem; display: flex; flex-direction: column; gap: 0.75rem;">
-      {% for msg in lead.email_thread %}
-        {% if msg.is_original %}
-          <div class="thread-message original-msg" style="border: 1px solid #cbd5e1; border-radius: 6px; padding: 0.75rem; background: var(--surface);">
-            <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.4rem;">Original Inquiry (Email #1)</div>
-            <div class="thread-msg-header" style="border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; margin-bottom: 0.5rem; font-size: 0.85rem; color: var(--text);">
-              <div><strong>From:</strong> {{ msg.sender }}</div>
-              <div><strong>To:</strong> {{ msg.recipient }}</div>
-            </div>
-            {% if msg.translated_from %}<div class="translation-notice">Translated from {{ msg.translated_from }} to English</div>{% endif %}
-            <div class="thread-msg-body" style="white-space: pre-wrap; font-family: inherit; font-size: 0.88rem; color: var(--text); line-height: 1.4;">{{ msg.body_text or '(no body text)' }}</div>
-          </div>
-        {% else %}
-          <div class="thread-message followup-msg" style="border: 1px solid #c7d2fe; border-radius: 6px; padding: 0.75rem; background: var(--surface-2);">
-            <div style="font-size: 0.75rem; font-weight: 700; color: #4338ca; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.4rem;">Follow-Up Email #{{ loop.index - 1 }}</div>
-            <div class="thread-msg-header" style="border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; margin-bottom: 0.5rem; font-size: 0.85rem; color: var(--text);">
-              <div><strong>From:</strong> {{ msg.sender }}</div>
-              <div><strong>To:</strong> {{ msg.recipient }}</div>
-            </div>
-            {% if msg.translated_from %}<div class="translation-notice">Translated from {{ msg.translated_from }} to English</div>{% endif %}
-            <div class="thread-msg-body" style="white-space: pre-wrap; font-family: inherit; font-size: 0.88rem; color: var(--text); line-height: 1.4;">{{ msg.body_text or '(no body text)' }}</div>
-          </div>
-        {% endif %}
-      {% endfor %}
-    </div>
-  </details>
-</div>
-{% endif %}
+{% include '_lead_replies.html' %}
+
+{% include '_lead_thread.html' %}

@@ -1,32 +1,107 @@
 {% extends 'base.html' %}
-{% block title %}Status{% endblock %}
+{% block title %}Lead Performance{% endblock %}
 {% block content %}
-  <h2>Pipeline Status</h2>
+<style>
+  .status-hero { display:flex; justify-content:space-between; gap:1rem; align-items:end; margin-bottom:1.2rem; }
+  .status-hero p { margin:.2rem 0 0; color:var(--text-muted); }
+  .sync-chip { border:1px solid var(--border); background:var(--surface); border-radius:999px; padding:.45rem .8rem; font-size:.78rem; white-space:nowrap; }
+  .kpi-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.8rem; margin-bottom:1rem; }
+  .kpi { background:var(--surface); border:1px solid var(--border); border-top:3px solid var(--navy); border-radius:var(--radius); padding:1rem; box-shadow:var(--shadow); }
+  .kpi.orange { border-top-color:var(--orange); } .kpi.green { border-top-color:var(--success); } .kpi.blue { border-top-color:var(--accent); }
+  .kpi-label { color:var(--text-muted); font-size:.74rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+  .kpi-value { font-family:'Raleway',sans-serif; font-size:1.85rem; font-weight:800; line-height:1.2; margin:.25rem 0; }
+  .kpi-note { color:var(--text-faint); font-size:.74rem; }
+  .funnel { display:grid; grid-template-columns:repeat(4,1fr); gap:2px; margin-top:.9rem; border-radius:8px; overflow:hidden; }
+  .funnel-step { background:var(--surface-2); padding:.8rem; text-align:center; border-bottom:3px solid var(--border); }
+  .funnel-step strong { display:block; font-size:1.25rem; } .funnel-step span { color:var(--text-muted); font-size:.76rem; }
+  .lead-search { display:flex; gap:.6rem; margin:.85rem 0 1rem; }
+  .lead-search input { flex:1; min-width:0; }
+  .outcome-table { width:100%; border-collapse:collapse; font-size:.84rem; }
+  .outcome-table th { text-align:left; color:var(--text-muted); font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; padding:.55rem; border-bottom:1px solid var(--border); }
+  .outcome-table td { padding:.7rem .55rem; border-bottom:1px solid var(--border); vertical-align:top; }
+  .outcome-table tr:last-child td { border-bottom:0; }
+  .lead-name { font-weight:700; color:var(--text); text-decoration:none; }
+  .subtle { color:var(--text-muted); font-size:.76rem; }
+  .table-scroll { overflow-x:auto; }
+  .outcome-filters { display:flex; gap:.45rem; flex-wrap:wrap; margin-top:.85rem; }
+  .outcome-filter { padding:.38rem .8rem; border:1px solid var(--border); border-radius:999px; color:var(--text-muted); text-decoration:none; font-size:.76rem; font-weight:700; }
+  .outcome-filter.active { background:var(--navy); border-color:var(--navy); color:#fff; }
+  details.ops summary { cursor:pointer; font-weight:700; color:var(--navy); }
+  .ops-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; margin-top:1rem; }
+  .ops-grid table { width:100%; font-size:.8rem; }
+  .ops-grid td { border-bottom:1px solid var(--border); padding:.35rem; overflow-wrap:anywhere; }
+  @media(max-width:800px) { .kpi-grid{grid-template-columns:repeat(2,1fr)} .funnel{grid-template-columns:repeat(2,1fr)} .ops-grid{grid-template-columns:1fr} .status-hero{display:block} .sync-chip{display:inline-block;margin-top:.7rem} }
+</style>
 
-  <div class="card">
-    <h3>Run state</h3>
-    <table>
-      {% for key, value in state.items() %}
-        <tr><td style="width:220px" class="field-name">{{ key }}</td><td>{{ value or '(not set yet)' }}</td></tr>
+<div class="status-hero">
+  <div>
+    <h2>Lead performance</h2>
+    <p>From intake and review through Oracle qualification and conversion.</p>
+  </div>
+  <div class="sync-chip">
+    Oracle sync: <strong>{{ state.oracle_sync_status or 'not run' }}</strong>
+    {% if state.oracle_sync_finished_at %}&middot; {{ state.oracle_sync_finished_at[:16]|replace('T',' ') }} UTC{% endif %}
+  </div>
+</div>
+
+<section class="kpi-grid" aria-label="Lead summary">
+  <div class="kpi"><div class="kpi-label">All leads</div><div class="kpi-value">{{ local_summary.total }}</div><div class="kpi-note">Received by this pipeline</div></div>
+  <div class="kpi orange"><div class="kpi-label">Rejected</div><div class="kpi-value">{{ local_summary.rejected }}</div><div class="kpi-note">Rejected during review</div></div>
+  <div class="kpi blue"><div class="kpi-label">Approved</div><div class="kpi-value">{{ local_summary.approved }}</div><div class="kpi-note">Staged, ready, or sent</div></div>
+  <div class="kpi green"><div class="kpi-label">Converted</div><div class="kpi-value">{{ oracle_summary.converted }}</div><div class="kpi-note">Leads with an Oracle opportunity</div></div>
+</section>
+
+<section class="card">
+  <h3>Oracle sales funnel</h3>
+  <p class="meta">Counts reflect the most recent successful read-only sync.</p>
+  <div class="funnel">
+    <div class="funnel-step"><strong>{{ local_summary.submitted }}</strong><span>Sent to Oracle</span></div>
+    <div class="funnel-step"><strong>{{ oracle_summary.synced }}</strong><span>Synced</span></div>
+    <div class="funnel-step"><strong>{{ oracle_summary.qualified }}</strong><span>Qualified</span></div>
+    <div class="funnel-step"><strong>{{ oracle_summary.converted }}</strong><span>Converted</span></div>
+  </div>
+</section>
+
+<section class="card">
+  <h3>Find a submitted lead</h3>
+  <p class="meta">Only leads created in Oracle by this pipeline are listed.</p>
+  <nav class="outcome-filters" aria-label="Filter lead outcomes">
+    <a class="outcome-filter {{ 'active' if outcome == 'all' }}" href="{{ url_for('status', outcome='all', q=query) }}">All submitted</a>
+    <a class="outcome-filter {{ 'active' if outcome == 'qualified' }}" href="{{ url_for('status', outcome='qualified', q=query) }}">Qualified</a>
+    <a class="outcome-filter {{ 'active' if outcome == 'converted' }}" href="{{ url_for('status', outcome='converted', q=query) }}">Converted</a>
+  </nav>
+  <form class="lead-search" method="get" action="{{ url_for('status') }}">
+    <input type="hidden" name="outcome" value="{{ outcome }}">
+    <input type="search" name="q" value="{{ query }}" placeholder="Name, company, email, Oracle lead, or opportunity number" aria-label="Search leads">
+    <button class="btn-secondary" type="submit">Search</button>
+    {% if query %}<a class="btn btn-secondary" href="{{ url_for('status', outcome=outcome) }}">Clear</a>{% endif %}
+  </form>
+  <div class="table-scroll">
+    <table class="outcome-table">
+      <thead><tr><th>Lead</th><th>Local</th><th>Oracle</th><th>Qualified</th><th>Opportunities</th></tr></thead>
+      <tbody>
+      {% for item in outcomes %}
+        <tr>
+          <td><a class="lead-name" href="{{ url_for('lead_lifecycle', lead_id=item.id) }}">{{ (item.first_name or '') ~ ' ' ~ (item.last_name or '') }}</a><div class="subtle">{{ item.organization or item.email or 'Lead #' ~ item.id }}</div></td>
+          <td><span class="badge badge-{{ 'clear' if item.local_status == 'submitted' else 'reject' if item.local_status in ('rejected','failed') else 'review' }}">{{ item.local_status|replace('_',' ') }}</span></td>
+          <td>{{ item.oracle_status or '—' }}{% if item.sync_error %}<div class="subtle">Sync error</div>{% endif %}</td>
+          <td>{{ item.qualified_at[:10] if item.qualified_at else '—' }}</td>
+          <td>{{ item.opportunity_count }}{% if item.has_won %}<div class="subtle">Won</div>{% endif %}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" class="meta">No leads match this search.</td></tr>
       {% endfor %}
+      </tbody>
     </table>
   </div>
+</section>
 
-  <div class="card">
-    <h3>Lead counts by status</h3>
-    <table>
-      {% for key, value in counts.items() %}
-        <tr><td style="width:220px" class="field-name">{{ key }}</td><td>{{ value }}</td></tr>
-      {% endfor %}
-    </table>
+<details class="card ops">
+  <summary>Operational details</summary>
+  <div class="ops-grid">
+    <div><h3>Run state</h3><table>{% for key,value in state.items() %}<tr><td>{{ key|replace('_',' ') }}</td><td>{{ value or '—' }}</td></tr>{% endfor %}</table></div>
+    <div><h3>Lead statuses</h3><table>{% for key,value in counts.items() %}<tr><td>{{ key|replace('_',' ') }}</td><td>{{ value }}</td></tr>{% endfor %}</table></div>
+    <div><h3>Message statuses</h3><table>{% for key,value in message_counts.items() %}<tr><td>{{ key|replace('_',' ') }}</td><td>{{ value }}</td></tr>{% endfor %}</table></div>
   </div>
-
-  <div class="card">
-    <h3>Message counts by status</h3>
-    <table>
-      {% for key, value in message_counts.items() %}
-        <tr><td style="width:220px" class="field-name">{{ key }}</td><td>{{ value }}</td></tr>
-      {% endfor %}
-    </table>
-  </div>
+</details>
 {% endblock %}

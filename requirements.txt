@@ -1,7 +1,5 @@
 openpyxl>=3.1.5
 python-dotenv>=1.0.1
-google-genai>=0.1.0
-
 # Lead pipeline: dashboard, secrets, Oracle REST
 flask>=3.0.0
 waitress>=3.0.0

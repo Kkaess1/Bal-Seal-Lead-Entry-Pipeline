@@ -1,31 +1,29 @@
 {% extends 'base.html' %}
 {% block title %}Input Queue{% endblock %}
 {% block content %}
-  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; margin-bottom:1.5rem;">
-    <div>
-      <h2 style="margin:0;">Input Queue — Session Review ({{ leads|length }})</h2>
-    </div>
+  <div class="page-head">
+    <h2>Input Queue — Session Review ({{ leads|length }})</h2>
     {% if leads %}
-      <form method="post" action="{{ url_for('queue_approve_all') }}" style="margin:0;">
-        <button type="submit" class="btn-approve" style="font-size:1rem; padding:0.6rem 1.4rem;">Approve All &amp; Send to Queue</button>
+      <form method="post" action="{{ url_for('queue_approve_all') }}">
+        <button type="submit" class="btn-approve btn-lg"
+                onclick="return confirm('Send {{ leads|length }} reviewed lead{{ '' if leads|length == 1 else 's' }} to Oracle?');">Confirm &amp; Send {{ leads|length }} to Oracle</button>
       </form>
     {% endif %}
   </div>
 
-
-
   {% for lead in leads %}
-    <div class="card" id="queue-card-{{ lead.id }}" data-lead-id="{{ lead.id }}" style="margin-bottom:1rem;">
+    <div class="card card-enter" id="queue-card-{{ lead.id }}" data-lead-id="{{ lead.id }}"
+         style="--i: {{ [loop.index0, 12]|min }}">
       <div class="card-head">
         <div>
-          <h3 style="margin:0; font-size:1.15rem;">
+          <h3>
             <strong>{{ lead.organization or '(No Company Specified)' }}</strong>
             {% if lead.display_name and lead.display_name != lead.organization %}
-              &mdash; <span style="color:var(--text); font-weight:normal;">{{ lead.display_name }}</span>
+              &mdash; <span class="queue-contact">{{ lead.display_name }}</span>
             {% endif %}
           </h3>
-          <div class="meta" style="margin-top:0.25rem;">
-            {% if lead.title %}<span style="font-weight:600; color:var(--text);">{{ lead.title }}</span> &bull; {% endif %}
+          <div class="meta">
+            {% if lead.title %}<strong>{{ lead.title }}</strong> &bull; {% endif %}
             {% if lead.email %}<span>{{ lead.email }}</span> &bull; {% endif %}
             {% if lead.phone %}<span>{{ lead.phone }}</span> &bull; {% endif %}
             {% if lead.location %}<span>{{ lead.location }}</span>{% endif %}
@@ -33,21 +31,30 @@
         </div>
       </div>
 
-      <div style="margin-top:0.5rem; display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:0.5rem;">
-        <details style="margin:0; flex:1; min-width:240px;">
-          <summary style="cursor:pointer; color:var(--accent); font-weight:600; font-size:0.88rem; user-select:none; line-height:2.2rem;">Expand Lead Details &amp; Fields</summary>
-          <div style="margin-top:0.75rem; padding-top:0.5rem; border-top:1px dashed var(--border);">
+      {# Why this lead came back. Above the fields rather than beside the
+         buttons: it names what to correct, so it belongs where the reviewer
+         reads before acting, not where they click after. #}
+      {% if lead.submit_error %}
+        <div class="submit-error-notice" role="alert">
+          <strong>Not sent to Oracle.</strong> {{ lead.submit_error|replace('Submission blocked: ', '') }}
+        </div>
+      {% endif %}
+
+      <div class="queue-card-body">
+        <details class="queue-details">
+          <summary>Expand Lead Details &amp; Fields</summary>
+          <div class="queue-details-body">
             {% include '_lead_table.html' %}
-            <div style="margin-top:0.75rem; padding-top:0.5rem; border-top:1px solid var(--border); display:flex; justify-content:flex-end;">
-              <form method="post" action="{{ url_for('queue_unstage', lead_id=lead.id) }}" style="display:inline; margin:0;">
-                <button type="submit" class="btn-secondary" style="color:var(--text);">Unstage (Return to Review)</button>
+            <div class="queue-details-foot">
+              <form method="post" action="{{ url_for('queue_unstage', lead_id=lead.id) }}">
+                <button type="submit" class="btn-secondary">Unstage (Return to Review)</button>
               </form>
             </div>
           </div>
         </details>
 
-        <div class="actions" style="display:flex; gap:0.5rem; align-items:center; margin-top:0.15rem;">
-          <form method="post" action="{{ url_for('reject', lead_id=lead.id) }}" style="display:inline; margin:0;">
+        <div class="actions queue-actions">
+          <form method="post" action="{{ url_for('reject', lead_id=lead.id) }}">
             <button type="submit" class="btn-reject">Reject</button>
           </form>
         </div>
@@ -55,33 +62,83 @@
     </div>
   {% endfor %}
 
-  <!-- OSC Scheduled Submission Queue Section -->
-  <div style="margin-top: 3rem; padding-top: 1.5rem; border-top: 2px solid var(--border);">
-    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; margin-bottom:1rem;">
-      <div>
-        <h3 style="margin:0; font-size: 1.15rem; font-weight: 700; color: var(--text);">Awaiting Scheduled OSC Submission ({{ ready_leads|length }})</h3>
-      </div>
+  <!-- Approved leads on their way to Oracle. Approval starts the submission
+       immediately; nothing here is waiting on a timer. -->
+  <div class="queue-approved">
+    <div class="page-head">
+      <h3>Approved for Oracle ({{ ready_leads|length }})</h3>
+      {% if ready_leads %}
+        <form method="post" action="{{ url_for('queue_submit_now') }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="btn-approve">Send to Oracle now</button>
+        </form>
+      {% endif %}
     </div>
 
+    {% for message in get_flashed_messages(category_filter=['submit_success']) %}
+      <div class="forward-notice forward-notice-success" role="status">{{ message }}</div>
+    {% endfor %}
+    {% for message in get_flashed_messages(category_filter=['submit_error']) %}
+      <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
+    {% endfor %}
+
     {% if not ready_leads %}
-      <div style="padding: 1.5rem; background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; text-align: center; color: var(--text-muted); font-size: 0.9rem;">
-        No approved leads currently waiting in the OSC submission queue.
-      </div>
+      <p class="empty">No approved leads are waiting to go to Oracle.</p>
     {% else %}
       {% for lead in ready_leads %}
-        <div class="card" style="margin-bottom: 0.75rem; border-left: 3px solid var(--success);">
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+        <div class="card card-enter card-ready" style="--i: {{ [loop.index0, 12]|min }}">
+          <div class="ready-row">
             <div>
-              <div style="font-weight: 700; font-size: 1rem; color: var(--text);">
-                {{ lead.display_name }}{% if lead.organization %} &mdash; {{ lead.organization }}{% endif %}
+              <div class="ready-name">
+                <a href="{{ url_for('lead_detail', lead_id=lead.id) }}">{{ lead.display_name }}</a>{% if lead.organization %} &mdash; {{ lead.organization }}{% endif %}
               </div>
-              <div class="meta" style="margin-top: 0.2rem;">
-                Status: <span style="font-weight: 600; color: var(--success);">Approved (Ready for OSC Sync)</span> &bull; 
-                Market: <strong>{{ lead.market or 'INDUSTRIAL' }}</strong> &bull; 
+              <div class="meta">
+                {# A lead a submit run has claimed says so, rather than reading
+                   "waiting" while nothing is coming for it. #}
+                Status:
+                <span class="ready-status">
+                  {%- if lead.status == 'submitting' -%}
+                    Sending to Oracle{% if lead.sending_since %} since {{ lead.sending_since }}{% endif %}
+                  {%- else -%}
+                    Approved — waiting for submission worker
+                  {%- endif -%}
+                </span> &bull;
+                Market: <strong>{{ lead.market or 'INDUSTRIAL' }}</strong> &bull;
                 TM: <strong>{{ lead.assigned_tm or 'Unassigned' }}</strong>
               </div>
+              {% if lead.sending_is_stuck %}
+                <div class="meta" style="margin-top: 0.35rem;">
+                  This submission stopped without finishing — the run holding it
+                  is gone. Release it to check Oracle and decide what happens next.
+                </div>
+              {% endif %}
+              {# An approved lead missing something Oracle requires will never
+                 be sent, however long it waits here. Say so, and offer the way
+                 back to the form where it gets fixed. #}
+              {% if lead.blockers and lead.can_recall %}
+                <div class="submit-error-notice" role="alert" style="margin: var(--s-3) 0 0;">
+                  <strong>This lead cannot be sent.</strong> {{ lead.blockers|join(' ') }}
+                  Take it back to Pending Review to correct it.
+                </div>
+              {% endif %}
             </div>
-            <span class="badge badge-clear" style="margin: 0;">Queued for OSC</span>
+            {% if lead.sending_is_stuck %}
+              <form method="post" action="{{ url_for('check_oracle', lead_id=lead.id) }}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn-secondary">Release &amp; check Oracle</button>
+              </form>
+            {% elif lead.can_recall %}
+              {# Always offered, not only when something is wrong: "approved"
+                 means nothing has been sent, so taking it back is safe, and an
+                 operator who approved the wrong lead should not need the
+                 database to undo it. #}
+              <form method="post" action="{{ url_for('recall_lead', lead_id=lead.id) }}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn-secondary">Take back to review</button>
+              </form>
+            {% else %}
+              <span class="badge badge-clear">{{ 'Sending' if lead.status == 'submitting' else 'Waiting' }}</span>
+            {% endif %}
           </div>
         </div>
       {% endfor %}

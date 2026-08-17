@@ -38,26 +38,46 @@ This document contains step-by-step instructions for IT and system administrator
 
 ---
 
-## 3. Automated Scheduling Setup (Ingest & OSC Submit)
+## 3. Automated Scheduling Setup
 
-The application uses automated background tasks to ingest and submit leads on the following schedule:
+Reading the mailbox and sending leads to Oracle remain human-triggered. The
+dashboard stays running, and a separate read-only reporting task refreshes
+Oracle lead outcomes daily.
 
 | Task | Command | Schedule | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Morning Ingest** | `python pipeline_ingest.py` | **8:00 AM Daily** | Fetches new lead emails, runs AI extraction, screens fraud risk, and stages leads in `pending_review`. |
-| **Afternoon Ingest** | `python pipeline_ingest.py` | **4:00 PM Daily** | Fetches afternoon lead emails and stages them in `pending_review`. |
-| **OSC Batch Submit** | `python pipeline_submit.py` | **5:00 PM Daily** | Processes all human-approved leads in SQLite and submits them to Oracle Sales Cloud via REST API. |
+| **Oracle Outcome Sync** | `python oracle_sync.py` | **Daily (default 6:00 AM)** | Read-only refresh of lead qualification, conversion, opportunities, and estimated revenue. |
+| **Review Dashboard** | `pythonw dashboard\serve.py` | **At logon, stays up** | Serves the review dashboard on http://127.0.0.1:5151. Windowless, restarts up to 3× on failure, a 10-minute heartbeat restarts it if it ever dies, and no execution time limit (the default would kill it after 3 days). |
+
+The dashboard task runs as the signed-in user with an interactive logon type,
+in the same session as Outlook — its reply/forward/delete actions and the
+ingest runs it launches drive Outlook through COM and cannot work from a
+`SYSTEM` service. It therefore stops when that user signs out and starts again
+at the next logon.
+
+Retired on 2026-08-07, and deleted by `setup_scheduler.bat` if an older run
+registered them: `LeadPipeline_Ingest_AM` (8:45 AM), `LeadPipeline_Ingest_PM`
+(4:00 PM) and `LeadPipeline_Submit_OSC` (5:00 PM).
 
 ### Windows Server (Automated Setup)
 Double-click or run the included batch script in PowerShell:
 ```powershell
 .\setup_scheduler.bat
+.\setup_oracle_sync_task.ps1
 ```
-This automatically registers the three tasks in **Windows Task Scheduler**.
 
-Scheduling is optional. The pipeline also runs entirely on demand: `py
-pipeline_ingest.py` when you want to pull mail, and the dashboard's "Approve
-All & Send to Queue" button launches `pipeline_submit.py` immediately.
+**Ingestion runs on demand:** the **Click to ingest leads** button on Pending
+Review, or `py pipeline_ingest.py`.
+
+**Submission runs when a human acts:** **Approve All & Send to Queue** on the
+Input Queue, **Send to Oracle now** for anything already approved (a lead whose
+first attempt hit a network error is put back to `approved` with a retry time,
+and this is what picks it up), or the retry action on an uncertain submission.
+
+Because nothing is scheduled, the stale-claim recovery in both entry points
+only runs when you start one. A message left in `processing` or a lead left in
+`submitting` by an interrupted run stays that way until the next ingest or
+submit you trigger.
 
 Note that the stale-claim recovery in both entry points only runs when that
 entry point runs. Without a schedule, a lead left in `submitting` or a message

@@ -61,7 +61,7 @@ app.config.update(
 
 ### 0.4 Secrets out of `.env`
 
-Move `ORACLE_USERNAME`, `ORACLE_PASSWORD` and `GEMINI_API_KEY` into Windows
+Move `ORACLE_USERNAME`, `ORACLE_PASSWORD` and `OPENAI_API_KEY` into Windows
 Credential Manager via `secrets_store.py`, stored **under the identity that runs
 the process** (Credential Manager is per-user). Then delete them from `.env`.
 
@@ -90,14 +90,20 @@ and any review of who accessed customer data.
 
 ### 1.2 Keep the CRM credentials out of the web tier
 
-`/queue/approve_all` spawns `pipeline_submit.py` as a child process
-([app.py:273-274](dashboard/app.py#L273-L274)), so the web-facing identity needs
-Oracle credentials today. Better: the button records intent only, and the
-existing scheduled `pipeline_submit.py` task — running as a different account —
-does the Oracle work. The exposed tier then never holds CRM credentials at all.
+`/queue/approve_all` spawns `pipeline_submit.py` as a child process, so the
+web-facing identity needs Oracle credentials today. Better: the button records
+intent only, and a separate worker running as a different account — polling for
+approved leads, or reading a queue the web tier writes to — does the Oracle
+work. The exposed tier then never holds CRM credentials at all.
 
-Cost: submissions happen on the schedule rather than instantly. If immediacy
-matters, keep the button but understand that it is what forces credentials into
+Note this is now the *only* way leads reach Oracle: the scheduled
+`pipeline_submit.py` task was removed on 2026-08-07 because nothing may upload
+a lead without a human approving it. Any split like the above has to keep that
+property — a worker that submits on a timer would reintroduce exactly what was
+removed; it must submit only what an operator has approved.
+
+Cost: submissions happen when the worker picks them up rather than instantly.
+If immediacy matters, keep the button but understand that it is what forces credentials into
 the web tier.
 
 ---

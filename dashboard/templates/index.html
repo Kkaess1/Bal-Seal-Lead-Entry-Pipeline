@@ -1,30 +1,110 @@
 {% extends 'base.html' %}
 {% block title %}Pending Review{% endblock %}
 {% block content %}
-  <h2>Pending Review ({{ leads|length }})</h2>
+  <div class="page-head">
+    <h2>Pending Review ({{ leads|length }})</h2>
+    <form method="post" action="{{ url_for('ingest_now') }}" id="ingest-form">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn-approve"
+              title="Read the Sales inbox now — this is the only thing that ingests emails">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+             style="width:16px;height:16px;">
+          <path d="M21 12a9 9 0 1 1-3.5-7.1"></path>
+          <path d="M21 3v6h-6"></path>
+        </svg>
+        Click to ingest leads
+      </button>
+    </form>
+  </div>
+
+  {% for message in get_flashed_messages(category_filter=['ingest_success']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}); });</script>
+  {% endfor %}
+  {% for message in get_flashed_messages(category_filter=['ingest_error']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}, 'error'); });</script>
+  {% endfor %}
+
+  <script>
+    (function() {
+      var form = document.getElementById('ingest-form');
+      if (form) {
+        form.addEventListener('submit', function(event) {
+          event.preventDefault();
+          var button = form.querySelector('button[type=submit]');
+          if (button) button.disabled = true;
+          fetch(form.action, {
+            method: 'POST',
+            body: new FormData(form),
+            headers: {
+              'X-Requested-With': 'XMLHttpRequest',
+              'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content
+            }
+          }).then(function(response) {
+            if (!response.ok) throw new Error('ingest failed: ' + response.status);
+            return response.json();
+          }).then(function(data) {
+            if (button) button.disabled = false;
+            showToast(data.ok ? data.message : data.error, data.ok ? null : 'error');
+          }).catch(function() {
+            // Keep the ordinary redirect/flash path as a reliable fallback.
+            form.submit();
+          });
+        });
+      }
+
+      // Pull newly ingested leads onto this page without making the operator
+      // babysit Refresh. Do not reload over active work or an open dialog.
+      window.setInterval(function() {
+        if (document.visibilityState !== 'visible') return;
+        if (document.querySelector('dialog[open]')) return;
+        if (document.querySelector('button[type="submit"]:disabled')) return;
+        var active = document.activeElement;
+        if (active && active.matches('input, textarea, select')) return;
+        var unsavedNote = Array.prototype.some.call(
+          document.querySelectorAll('textarea[name="review_notes"]'),
+          function(note) { return note.value !== note.defaultValue; }
+        );
+        if (unsavedNote) return;
+        window.location.reload();
+      }, 30000);
+    })();
+  </script>
 
   {% if not leads %}
-    <div class="empty-container" style="text-align: center; margin: 4rem auto; max-width: 500px; padding: 2.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;">
-      <h3 style="margin-top: 0; margin-bottom: 1.5rem; font-size: 1.25rem;">No leads waiting for review</h3>
-      <a href="{{ url_for('queue') }}" class="btn-approve" style="display: inline-flex; align-items: center; gap: 0.5rem; text-decoration: none; font-size: 1.05rem; padding: 0.75rem 1.6rem; border-radius: 8px;">
-        Review All Leads &rarr;
-      </a>
+    <div class="empty-container">
+      <h3>No leads waiting for review</h3>
+      <a href="{{ url_for('queue') }}" class="btn btn-approve">Review All Leads &rarr;</a>
     </div>
   {% endif %}
 
+  {# --i drives the staggered card entrance, capped at 12 so a long queue does
+     not spend several seconds dealing itself out one card at a time. #}
   {% for lead in leads %}
-    <div class="card lead-forward-card" id="lead-card-{{ lead.id }}" data-lead-id="{{ lead.id }}">
+    <div class="card card-enter lead-forward-card" id="lead-card-{{ lead.id }}" data-lead-id="{{ lead.id }}"
+         style="--i: {{ [loop.index0, 12]|min }}">
       <div class="card-head">
         <h3><a href="{{ url_for('lead_detail', lead_id=lead.id) }}">{{ lead.display_name }}{% if lead.organization %} &mdash; {{ lead.organization }}{% endif %}</a></h3>
       </div>
+      {# Carried back from a submission that could not go through. Without this
+         the reason sat in the database where only the bell ever showed it. #}
+      {% if lead.submit_error %}
+        <div class="submit-error-notice" role="alert">
+          <strong>Not sent to Oracle.</strong> {{ lead.submit_error|replace('Submission blocked: ', '') }}
+        </div>
+      {% endif %}
       {% include '_lead_table.html' %}
-      <div class="actions" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+      {# One row: what to do with the lead on the left, what to do with its
+         email on the right. The email buttons are inside this flex row rather
+         than pinned to the card's bottom corner, which left them sitting a
+         line below the buttons they belong beside. #}
+      <div class="actions">
         <a class="btn btn-secondary" href="{{ url_for('lead_detail', lead_id=lead.id) }}">Review / Edit details</a>
 
-        <details style="margin:0; width:100%; order:10;">
-          <summary class="btn btn-secondary" style="cursor:pointer; font-weight:600; font-size:0.88rem; user-select:none; display:inline-block;">Notes</summary>
-          <div style="margin-top:0.75rem; width:100%; box-sizing:border-box;">
-            <textarea form="approve-form-{{ lead.id }}" name="review_notes" placeholder="Enter notes for this lead..." style="width:100%; min-height:75px; font-family:inherit; font-size:0.88rem; padding:0.6rem; border:1px solid var(--border); border-radius:6px; box-sizing:border-box; background:var(--bg-card); color:var(--text);">{{ lead.review_notes or '' }}</textarea>
+        <details class="lead-notes">
+          <summary class="btn btn-secondary">Notes</summary>
+          <div class="lead-notes-body">
+            <textarea form="approve-form-{{ lead.id }}" name="review_notes" placeholder="Enter notes for this lead...">{{ lead.review_notes or '' }}</textarea>
           </div>
         </details>
 
@@ -34,17 +114,54 @@
         <form method="post" action="{{ url_for('reject', lead_id=lead.id) }}" style="display:inline">
           <button type="submit" class="btn-reject">Reject</button>
         </form>
+
+        <div class="email-actions">
+          {% if delete_enabled %}
+            <button type="button" class="btn email-action email-action-danger open-delete-dialog"
+                    data-delete-url="{{ url_for('delete_lead_email', lead_id=lead.id) }}"
+                    data-lead-name="{{ lead.display_name }}"
+                    data-lead-count="{{ lead.message_lead_count }}"
+                    title="Delete this email from the inbox"
+                    aria-label="Delete the email for {{ lead.display_name }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6h18"></path>
+                <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"></path>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                <path d="M10 11v6"></path>
+                <path d="M14 11v6"></path>
+              </svg>
+              Delete
+            </button>
+          {% endif %}
+          <button type="button" class="btn email-action open-reply-dialog"
+                  data-reply-url="{{ url_for('reply_lead_email', lead_id=lead.id) }}"
+                  data-lead-name="{{ lead.display_name }}"
+                  data-reply-to="{{ lead.reply_to_address or 'the original sender' }}"
+                  data-candidates="{{ lead.reply_candidates|tojson|forceescape }}"
+                  title="Reply to this email" aria-label="Reply to the email from {{ lead.display_name }}">
+            {# Corner-up-left, not the mirror image of the forward arrow: at this
+               size two mirrored arrows are indistinguishable. #}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 14 4 9l5-5"></path>
+              <path d="M20 20v-7a4 4 0 0 0-4-4H4"></path>
+            </svg>
+            Reply
+          </button>
+          <button type="button" class="btn email-action open-forward-dialog"
+                  data-forward-url="{{ url_for('forward_lead_email', lead_id=lead.id) }}"
+                  data-lead-name="{{ lead.display_name }}"
+                  title="Forward this email" aria-label="Forward email for {{ lead.display_name }}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m15 8 5 4-5 4"></path>
+              <path d="M4 18v-2a4 4 0 0 1 4-4h12"></path>
+            </svg>
+            Forward
+          </button>
+        </div>
       </div>
-      <button type="button" class="forward-fab open-forward-dialog"
-              data-forward-url="{{ url_for('forward_lead_email', lead_id=lead.id) }}"
-              data-lead-name="{{ lead.display_name }}"
-              title="Forward this email" aria-label="Forward email for {{ lead.display_name }}">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="m15 8 5 4-5 4"></path>
-          <path d="M4 18v-2a4 4 0 0 1 4-4h12"></path>
-        </svg>
-      </button>
     </div>
   {% endfor %}
 
@@ -55,13 +172,22 @@
           <h3>Forward email</h3>
           <button type="button" class="forward-dialog-close" aria-label="Close">&times;</button>
         </div>
-        <p class="meta"><span id="forward-lead-name"></span>The original email, including its attachments, will be forwarded and removed from the lead review queue.</p>
+        <p class="meta"><span id="forward-lead-name"></span>Removes the lead from review.</p>
+        {# No tick-list of the people already on the email, unlike the reply
+           dialog: forwarding hands the message to someone who is not on it. #}
         <label for="forward-recipient">Forward to</label>
-        <input type="email" id="forward-recipient" name="recipient" required
+        <input type="text" inputmode="email" id="forward-recipient" name="recipient" required
+               data-address-autocomplete data-address-multiple="1"
                autocomplete="email" placeholder="name@example.com">
+        <label for="forward-cc">Cc <span class="label-optional">(optional)</span></label>
+        <input type="text" inputmode="email" id="forward-cc" name="cc_recipients"
+               data-address-autocomplete data-address-multiple="1"
+               autocomplete="email" placeholder="Cc someone else">
+        <p class="reply-add-hint">Separate several addresses with a comma.</p>
         <label for="forward-note">Message <span class="label-optional">(optional)</span></label>
         <textarea id="forward-note" name="forward_note" maxlength="5000"
                   placeholder="Add a message above the forwarded email..."></textarea>
+        <p class="dialog-error" role="alert" hidden></p>
         <div class="actions forward-dialog-actions">
           <button type="button" class="btn btn-secondary forward-cancel">Cancel</button>
           <button type="submit" class="btn-approve">Send email</button>
@@ -74,6 +200,7 @@
         var dialog = document.getElementById('forward-dialog');
         var form = document.getElementById('forward-form');
         var recipient = document.getElementById('forward-recipient');
+        var forwardCc = document.getElementById('forward-cc');
         var forwardNote = document.getElementById('forward-note');
         var leadName = document.getElementById('forward-lead-name');
         if (!dialog || !form) return;
@@ -82,14 +209,197 @@
             form.action = button.dataset.forwardUrl;
             leadName.textContent = button.dataset.leadName + ': ';
             recipient.value = '';
+            forwardCc.value = '';
             forwardNote.value = '';
             dialog.showModal();
             recipient.focus();
           });
         });
+        form.addEventListener('submit', function(event) {
+          event.preventDefault();
+          submitEmailAction(form, dialog);
+        });
+
         var closeDialog = function() { dialog.close(); };
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.forward-cancel').addEventListener('click', closeDialog);
+        dialog.addEventListener('click', function(event) {
+          if (event.target === dialog) closeDialog();
+        });
+      })();
+    </script>
+  {% endif %}
+
+  {% if leads %}
+    <dialog class="forward-dialog" id="reply-dialog">
+      <form method="post" id="reply-form">
+        <div class="forward-dialog-head">
+          <h3>Reply to email</h3>
+          <button type="button" class="forward-dialog-close" aria-label="Close">&times;</button>
+        </div>
+        <label>Reply to</label>
+        <div class="reply-recipients" id="reply-recipients"></div>
+        <input type="text" name="extra_recipients" id="reply-extra" data-address-autocomplete data-address-multiple="1"
+               placeholder="Add someone else">
+        <input type="text" name="extra_cc_recipients" id="reply-extra-cc" data-address-autocomplete data-address-multiple="1"
+               placeholder="Cc someone else">
+        <p class="reply-add-hint">Separate several addresses with a comma.</p>
+
+        <label for="reply-body">Message</label>
+        <textarea id="reply-body" name="reply_body" required maxlength="10000"
+                  placeholder="Write your reply..."></textarea>
+        <p class="dialog-error" role="alert" hidden></p>
+        <div class="actions forward-dialog-actions">
+          <button type="button" class="btn btn-secondary reply-cancel">Cancel</button>
+          <button type="submit" class="btn-approve">Send reply</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script>
+      (function() {
+        var dialog = document.getElementById('reply-dialog');
+        var form = document.getElementById('reply-form');
+        var body = document.getElementById('reply-body');
+        var recipientBox = document.getElementById('reply-recipients');
+        var extra = document.getElementById('reply-extra');
+        if (!dialog || !form) return;
+
+        // One dialog serves every card, so the tick-list is rebuilt per lead.
+        // Only the person who wrote the email is ticked; everyone else on the
+        // thread is offered but off, because answering a follow-up should not
+        // copy in the customer unless that is asked for.
+        var buildRecipients = function(candidates, preselect) {
+          recipientBox.textContent = '';
+          if (!candidates.length) {
+            var empty = document.createElement('p');
+            empty.className = 'meta';
+            empty.style.margin = '0';
+            empty.textContent = 'No recipients found on this email.';
+            recipientBox.appendChild(empty);
+            return;
+          }
+          candidates.forEach(function(person) {
+            var row = document.createElement('div');
+            row.className = 'reply-recipient';
+
+            var modes = document.createElement('span');
+            modes.className = 'reply-recipient-modes';
+            var boxes = [];
+            [['recipients', 'to', 'To', 'Address the reply to this person'],
+             ['cc_recipients', 'cc', 'Cc', 'Copy this person in']].forEach(function(spec) {
+              var label = document.createElement('label');
+              label.title = spec[3];
+              var box = document.createElement('input');
+              box.type = 'checkbox';
+              box.name = spec[0];
+              box.value = person.address;
+              box.dataset.mode = spec[1];
+              box.checked = spec[1] === 'to'
+                && person.address.toLowerCase() === (preselect || '').toLowerCase();
+              // To and Cc are a choice between two, not two independent ticks.
+              box.addEventListener('change', function() {
+                if (!box.checked) return;
+                boxes.forEach(function(other) {
+                  if (other !== box) other.checked = false;
+                });
+              });
+              boxes.push(box);
+              label.appendChild(box);
+              label.appendChild(document.createTextNode(' ' + spec[2]));
+              modes.appendChild(label);
+            });
+
+            var who = document.createElement('span');
+            who.className = 'reply-recipient-who';
+            who.textContent = person.name || person.address;
+
+            row.appendChild(modes);
+            row.appendChild(who);
+            if (person.name) {
+              var addr = document.createElement('span');
+              addr.className = 'reply-recipient-addr';
+              addr.textContent = person.address;
+              row.appendChild(addr);
+            }
+            recipientBox.appendChild(row);
+          });
+        };
+
+        document.querySelectorAll('.open-reply-dialog').forEach(function(button) {
+          button.addEventListener('click', function() {
+            form.action = button.dataset.replyUrl;
+            body.value = '';
+            extra.value = '';
+            document.getElementById('reply-extra-cc').value = '';
+            var candidates = [];
+            try {
+              candidates = JSON.parse(button.dataset.candidates || '[]');
+            } catch (e) { candidates = []; }
+            buildRecipients(candidates, button.dataset.replyTo);
+            dialog.showModal();
+            body.focus();
+          });
+        });
+        form.addEventListener('submit', function(event) {
+          event.preventDefault();
+          submitEmailAction(form, dialog);
+        });
+
+        var closeDialog = function() { dialog.close(); };
+        dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
+        dialog.querySelector('.reply-cancel').addEventListener('click', closeDialog);
+        dialog.addEventListener('click', function(event) {
+          if (event.target === dialog) closeDialog();
+        });
+      })();
+    </script>
+  {% endif %}
+
+  {% if leads and delete_enabled %}
+    <dialog class="forward-dialog" id="delete-dialog">
+      <form method="post" id="delete-form">
+        <div class="forward-dialog-head">
+          <h3>Delete email</h3>
+          <button type="button" class="forward-dialog-close" aria-label="Close">&times;</button>
+        </div>
+        <p class="meta"><span id="delete-lead-name"></span>Moves the email to Deleted Items in Outlook.</p>
+        <p class="delete-dialog-warning" id="delete-sibling-warning" hidden></p>
+        <p class="dialog-error" role="alert" hidden></p>
+        <div class="actions forward-dialog-actions">
+          <button type="button" class="btn btn-secondary delete-cancel">Cancel</button>
+          <button type="submit" class="btn-reject">Delete email</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script>
+      (function() {
+        var dialog = document.getElementById('delete-dialog');
+        var form = document.getElementById('delete-form');
+        var leadName = document.getElementById('delete-lead-name');
+        var siblingWarning = document.getElementById('delete-sibling-warning');
+        if (!dialog || !form) return;
+        document.querySelectorAll('.open-delete-dialog').forEach(function(button) {
+          button.addEventListener('click', function() {
+            form.action = button.dataset.deleteUrl;
+            leadName.textContent = button.dataset.leadName + ': ';
+            var leadCount = parseInt(button.dataset.leadCount, 10) || 1;
+            siblingWarning.hidden = leadCount < 2;
+            siblingWarning.textContent = 'All ' + leadCount +
+              ' leads pulled from this email will be dropped, not just this one.';
+            dialog.showModal();
+          });
+        });
+
+        form.addEventListener('submit', function(event) {
+          event.preventDefault();
+          submitEmailAction(form, dialog);
+        });
+
+        var closeDialog = function() { dialog.close(); };
+        dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
+        dialog.querySelector('.delete-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
           if (event.target === dialog) closeDialog();
         });

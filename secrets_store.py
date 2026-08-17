@@ -6,7 +6,7 @@ variables (.env) for local dev convenience or if keyring is unavailable.
 Only meant for actual short secrets (API keys, the Oracle username/password
 used for REST basic auth).
 
-Usage to store a secret:  py secrets_store.py ANTHROPIC_API_KEY sk-...
+Usage to store a secret:  py secrets_store.py OPENAI_API_KEY sk-...
 """
 
 import os

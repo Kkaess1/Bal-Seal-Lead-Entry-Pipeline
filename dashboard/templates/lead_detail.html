@@ -2,7 +2,7 @@
 {% block title %}{{ lead.display_name }}{% endblock %}
 {% block content %}
   <p>
-    {% if request.args.get('forwarded') or lead.status in ('pending_review', 'review_approved') %}
+    {% if request.args.get('forwarded') or request.args.get('deleted') or request.args.get('replied') or lead.status in editable_statuses %}
       <a href="{{ url_for('index') }}">&larr; back to pending review</a>
     {% else %}
       <a href="{{ url_for('history') }}">&larr; back to history</a>
@@ -15,42 +15,135 @@
     </div>
 
     {% if request.args.get('saved') %}
-      <div style="padding: 0.75rem 1rem; background: #dcfce7; color: #166534; border-radius: 6px; margin: 1rem 0; font-weight: 500;">
+      {# Same component as every other success notice on the site: the hardcoded
+         #dcfce7/#166534 this replaced stayed pale-green on a near-black page. #}
+      <div class="forward-notice forward-notice-success" role="status">
         ✓ Lead details saved successfully.
       </div>
     {% endif %}
 
+    {# Approval refused because a required field is missing. Shown here because
+       approve() redirects to this page -- the form where the fix is made. #}
+    {% for message in get_flashed_messages(category_filter=['approve_error']) %}
+      <div class="submit-error-notice" role="alert">
+        <strong>Cannot approve yet.</strong> {{ message|replace('Cannot approve: ', '') }}
+      </div>
+    {% endfor %}
     {% for message in get_flashed_messages(category_filter=['forward_success']) %}
       <div class="forward-notice forward-notice-success" role="status">{{ message }}</div>
     {% endfor %}
     {% for message in get_flashed_messages(category_filter=['forward_error']) %}
       <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
     {% endfor %}
+    {% for message in get_flashed_messages(category_filter=['delete_success']) %}
+      <div class="forward-notice forward-notice-success" role="status">{{ message }}</div>
+    {% endfor %}
+    {% for message in get_flashed_messages(category_filter=['delete_error']) %}
+      <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
+    {% endfor %}
+    {% for message in get_flashed_messages(category_filter=['reply_success']) %}
+      <div class="forward-notice forward-notice-success" role="status">{{ message }}</div>
+    {% endfor %}
+    {% for message in get_flashed_messages(category_filter=['reply_error']) %}
+      <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
+    {% endfor %}
+    {% for message in get_flashed_messages(category_filter=['attachment_success']) %}
+      <div class="forward-notice forward-notice-success" role="status">{{ message }}</div>
+    {% endfor %}
+    {% for message in get_flashed_messages(category_filter=['attachment_error']) %}
+      <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
+    {% endfor %}
 
-    {% if lead.status in ('pending_review', 'review_approved') %}
-      <form method="post" action="{{ url_for('save_lead', lead_id=lead.id) }}">
-        <table style="width: 100%; margin-top: 0.5rem; border-collapse: collapse;">
-          {% for field in schema_fields %}
-            <tr style="border-bottom: 1px solid var(--border);">
-              <td style="width: 160px; vertical-align: top; padding: 0.5rem 0.5rem 0.5rem 0;"><span class="field-name">{{ field }}</span></td>
-              <td style="padding: 0.5rem 0;">
-                {% if field in ('lead_details', 'notes_body', 'survey_answers', 'qualifiers') %}
+    {# A lead sent back by a failed submission: say why at the top of the form
+       the correction gets made in, not only on the queue card it came from.
+       Covers pending_review too -- a lead returned by hand from History lands
+       there, and used to carry its reason invisibly. #}
+    {% if lead.status in editable_statuses and lead.submit_error %}
+      <div class="submit-error-notice" role="alert">
+        <strong>Not sent to Oracle.</strong> {{ lead.submit_error|replace('Submission blocked: ', '') }}
+        Correct it below and save, then send it again from the Input Queue.
+      </div>
+    {% endif %}
+
+    {% if lead.status in editable_statuses %}
+      <form method="post" action="{{ url_for('save_lead', lead_id=lead.id) }}" class="lead-edit-form">
+        {% for group_name, fields in field_groups %}
+          <fieldset class="edit-section">
+            <legend>{{ group_name }}</legend>
+            <div class="edit-grid">
+              {% for field in fields %}
+                <label class="edit-field{% if field in ('lead_details', 'notes_body', 'survey_answers', 'qualifiers') %} edit-field-wide{% endif %}">
+                  <span>{{ field|replace('_', ' ')|title|replace('Zip', 'ZIP') }}</span>
                   {% if field == 'lead_details' and lead.translated_from %}
-                    <div class="translation-notice">Translated from {{ lead.translated_from }} to English</div>
+                    <span class="translation-notice">Translated from {{ lead.translated_from }} to English</span>
                   {% endif %}
-                  <textarea name="{{ field }}" style="width: 100%; min-height: 80px; font-family: inherit;">{{ lead[field] or '' }}</textarea>
-                {% else %}
-                  <input type="text" name="{{ field }}" value="{{ lead[field] or '' }}" style="width: 100%; font-family: inherit;">
-                {% endif %}
-              </td>
-            </tr>
-          {% endfor %}
-        </table>
+                  {% if field in ('lead_details', 'notes_body', 'survey_answers', 'qualifiers') %}
+                    <textarea name="{{ field }}">{{ lead[field] or '' }}</textarea>
+                  {% elif field == 'rank' %}
+                    <select name="rank">
+                      {% for value in ('', 'HOT', 'WARM') %}<option value="{{ value }}"{% if (lead.rank or '')|upper == value %} selected{% endif %}>{{ value or 'Not set' }}</option>{% endfor %}
+                    </select>
+                  {% else %}
+                    <input type="{{ 'email' if field == 'email' else 'url' if field == 'website' else 'text' }}" name="{{ field }}" value="{{ lead[field] or '' }}">
+                  {% endif %}
+                  {% if field == 'assigned_tm' and lead.assigned_tm_basis %}<small>{{ lead.assigned_tm_basis }}</small>{% endif %}
+                </label>
+              {% endfor %}
+            </div>
+          </fieldset>
+        {% endfor %}
 
         <div class="actions" style="margin-top: 1.5rem;">
-          <button type="submit" class="btn-approve" style="font-weight: 600; padding: 0.65rem 1.6rem;">Save Changes</button>
+          <button type="submit" class="btn-approve btn-lg">Save Changes</button>
         </div>
       </form>
+
+      {# The edit form replaces _lead_table.html on a pending lead, so the reply
+         log and the email thread have to be included here too rather than only
+         through that table. The thread matters most on a pending lead: that is
+         when someone is deciding whether to forward it. #}
+      {# Reference only, and not one of the editable schema fields above:
+         Oracle's Owner is the Territory Manager, not this. #}
+      <div style="margin-top: 1rem;">
+        <span class="field-name">Sales Rep</span>
+        <div style="margin-top: 0.35rem;">
+          {% if lead.sales_rep %}
+            <strong>{{ lead.sales_rep }}</strong>
+            <span class="meta">&middot; {{ lead.sales_rep_basis }}</span>
+          {% else %}
+            <span class="text-warn">Unassigned</span>
+            {% if lead.sales_rep_basis %}<span class="meta">&middot; {{ lead.sales_rep_basis }}</span>{% endif %}
+          {% endif %}
+        </div>
+      </div>
+
+      {# Nothing on the lead says where this company is, so offer to go and
+         find out -- see hq_lookup.py. Outside the edit form above, not nested
+         in it: this posts on its own and reloads the page, so anything typed
+         above and not yet saved would be lost. #}
+      {% if hq_lookup_enabled and not lead.assigned_tm %}
+        <div style="margin-top: 1rem;">
+          <form method="post" action="{{ url_for('find_hq', lead_id=lead.id) }}" class="hq-lookup-form">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-secondary">Find the company's head office</button>
+          </form>
+          <p class="meta" style="margin-top: 0.35rem;">
+            Reads the company's website and other public pages to work out
+            where it is based, and routes the lead from that. Takes up to a
+            minute, and reloads this page — save any edits above first.
+          </p>
+        </div>
+      {% endif %}
+
+      {% if lead.attachments %}
+        <div style="margin-top: 1rem;">
+          <span class="field-name">Attachments</span>
+          <div style="margin-top: 0.35rem;">{% include '_lead_attachments.html' %}</div>
+        </div>
+      {% endif %}
+
+      {% include '_lead_replies.html' %}
+      {% include '_lead_thread.html' %}
     {% else %}
       {% include '_lead_table.html' %}
 
@@ -64,7 +157,7 @@
           <p style="margin: 0.25rem 0;"><strong>Review Notes:</strong> {{ lead.review_notes }}</p>
         {% endif %}
         {% if lead.submit_error %}
-          <p style="margin: 0.25rem 0; color: #dc2626;"><strong>Submit Error:</strong> {{ lead.submit_error }}</p>
+          <p class="detail-error"><strong>Submit Error:</strong> {{ lead.submit_error }}</p>
         {% endif %}
         {% if lead.reviewed_by or lead.reviewed_at %}
           <p class="meta" style="margin: 0.25rem 0;">Reviewed by <strong>{{ lead.reviewed_by or 'dashboard' }}</strong> {% if lead.reviewed_at %}on {{ lead.reviewed_at }}{% endif %}</p>
@@ -75,33 +168,83 @@
               <button type="submit" class="btn-secondary">Return to Pending Review</button>
             </form>
           </div>
+        {% elif lead.status in recallable_statuses %}
+          {# Approved but not yet sent, so its fields are not editable here.
+             This is the way back to the form that can edit them -- without it
+             a lead approved with something missing (a Territory Manager, most
+             often) could be opened but never corrected. #}
+          <div style="margin-top: 1rem;">
+            <p class="meta" style="margin: 0 0 0.5rem;">
+              Approved leads cannot be edited. Take this one back to Pending
+              Review to change its fields, then approve it again.
+            </p>
+            <form method="post" action="{{ url_for('recall_lead', lead_id=lead.id) }}" style="display:inline;">
+              <button type="submit" class="btn-secondary">Take back to review</button>
+            </form>
+          </div>
         {% endif %}
       </div>
     {% endif %}
 
-    {% if lead.status in ('pending_review', 'review_approved') %}
-      <button type="button" class="forward-fab" id="open-forward-dialog"
-              title="Forward this email" aria-label="Forward this email">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="m15 8 5 4-5 4"></path>
-          <path d="M4 18v-2a4 4 0 0 1 4-4h12"></path>
-        </svg>
-      </button>
+    {% if lead.status in editable_statuses %}
+      <div class="email-actions">
+        {% if delete_enabled %}
+          <button type="button" class="btn email-action email-action-danger" id="open-delete-dialog"
+                  title="Delete this email from the inbox">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 6h18"></path>
+              <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"></path>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+              <path d="M10 11v6"></path>
+              <path d="M14 11v6"></path>
+            </svg>
+            Delete
+          </button>
+        {% endif %}
+        <button type="button" class="btn email-action" id="open-reply-dialog"
+                title="Reply to this email">
+          {# Corner-up-left, not the mirror image of the forward arrow: at this
+             size two mirrored arrows are indistinguishable. #}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 14 4 9l5-5"></path>
+            <path d="M20 20v-7a4 4 0 0 0-4-4H4"></path>
+          </svg>
+          Reply
+        </button>
+        <button type="button" class="btn email-action" id="open-forward-dialog"
+                title="Forward this email">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m15 8 5 4-5 4"></path>
+            <path d="M4 18v-2a4 4 0 0 1 4-4h12"></path>
+          </svg>
+          Forward
+        </button>
+      </div>
     {% endif %}
   </div>
 
-  {% if lead.status in ('pending_review', 'review_approved') %}
+  {% if lead.status in editable_statuses %}
     <dialog class="forward-dialog" id="forward-dialog">
       <form method="post" action="{{ url_for('forward_lead_email', lead_id=lead.id) }}">
         <div class="forward-dialog-head">
           <h3>Forward email</h3>
           <button type="button" class="forward-dialog-close" aria-label="Close">&times;</button>
         </div>
-        <p class="meta">The original email, including its attachments, will be forwarded and removed from the lead review queue.</p>
+        <p class="meta">Removes the lead from review.</p>
+        {# No tick-list of the people already on the email, unlike the reply
+           dialog: forwarding hands the message to someone who is not on it. #}
         <label for="forward-recipient">Forward to</label>
-        <input type="email" id="forward-recipient" name="recipient" required
+        <input type="text" inputmode="email" id="forward-recipient" name="recipient" required
+               data-address-autocomplete data-address-multiple="1"
                autocomplete="email" placeholder="name@example.com">
+        <label for="forward-cc">Cc <span class="label-optional">(optional)</span></label>
+        <input type="text" inputmode="email" id="forward-cc" name="cc_recipients"
+               data-address-autocomplete data-address-multiple="1"
+               autocomplete="email" placeholder="Cc someone else">
+        <p class="reply-add-hint">Separate several addresses with a comma.</p>
         <label for="forward-note">Message <span class="label-optional">(optional)</span></label>
         <textarea id="forward-note" name="forward_note" maxlength="5000"
                   placeholder="Add a message above the forwarded email..."></textarea>
@@ -124,6 +267,159 @@
         });
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.forward-cancel').addEventListener('click', closeDialog);
+        dialog.addEventListener('click', function(event) {
+          if (event.target === dialog) closeDialog();
+        });
+      })();
+    </script>
+  {% endif %}
+
+  {% if lead.status in editable_statuses %}
+    <dialog class="forward-dialog" id="reply-dialog">
+      <form method="post" action="{{ url_for('reply_lead_email', lead_id=lead.id) }}">
+        <div class="forward-dialog-head">
+          <h3>Reply to email</h3>
+          <button type="button" class="forward-dialog-close" aria-label="Close">&times;</button>
+        </div>
+        {# Which message of the thread is being answered. Set by the reply
+           button on each message; blank means the lead's own email. #}
+        <input type="hidden" name="thread_received_at" id="reply-thread-received-at" value="">
+        <input type="hidden" name="thread_sender" id="reply-thread-sender" value="">
+
+        <label>Reply to</label>
+        <div class="reply-recipients" id="reply-recipients">
+          {% for person in lead.reply_candidates %}
+            <div class="reply-recipient" data-address="{{ person.address }}">
+              <span class="reply-recipient-modes">
+                <label title="Address the reply to this person">
+                  <input type="checkbox" name="recipients" value="{{ person.address }}"
+                         data-mode="to"> To
+                </label>
+                <label title="Copy this person in">
+                  <input type="checkbox" name="cc_recipients" value="{{ person.address }}"
+                         data-mode="cc"> Cc
+                </label>
+              </span>
+              <span class="reply-recipient-who">{{ person.name or person.address }}</span>
+              {% if person.name %}<span class="reply-recipient-addr">{{ person.address }}</span>{% endif %}
+            </div>
+          {% else %}
+            <p class="meta" style="margin:0;">No recipients found on this email.</p>
+          {% endfor %}
+        </div>
+        <input type="text" name="extra_recipients" id="reply-extra" data-address-autocomplete data-address-multiple="1"
+               placeholder="Add someone else">
+        <input type="text" name="extra_cc_recipients" id="reply-extra-cc" data-address-autocomplete data-address-multiple="1"
+               placeholder="Cc someone else">
+        <p class="reply-add-hint">Separate several addresses with a comma.</p>
+
+        <label for="reply-body">Message</label>
+        <textarea id="reply-body" name="reply_body" required maxlength="10000"
+                  placeholder="Write your reply..."></textarea>
+        <div class="actions forward-dialog-actions">
+          <button type="button" class="btn btn-secondary reply-cancel">Cancel</button>
+          <button type="submit" class="btn-approve">Send reply</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script>
+      (function() {
+        var dialog = document.getElementById('reply-dialog');
+        var openButton = document.getElementById('open-reply-dialog');
+        if (!dialog || !openButton) return;
+
+        // Opening the dialog decides one thing: who is ticked. Answering a
+        // colleague's follow-up should go back to them alone, so only the
+        // sender of the message being replied to starts ticked -- everyone
+        // else is a deliberate extra click.
+        var prepare = function(opts) {
+          opts = opts || {};
+          document.getElementById('reply-thread-received-at').value = opts.receivedAt || '';
+          document.getElementById('reply-thread-sender').value = opts.sender || '';
+          document.getElementById('reply-extra').value = '';
+          document.getElementById('reply-extra-cc').value = '';
+          document.getElementById('reply-body').value = '';
+
+          var wanted = (opts.sender || '{{ lead.reply_to_address or "" }}').toLowerCase();
+          var anyTicked = false;
+          dialog.querySelectorAll('.reply-recipient').forEach(function(row) {
+            var isTarget = row.dataset.address.toLowerCase() === wanted;
+            row.querySelector('input[data-mode=to]').checked = isTarget;
+            row.querySelector('input[data-mode=cc]').checked = false;
+            anyTicked = anyTicked || isTarget;
+          });
+          // Sender not among the candidates (an older thread message, say):
+          // put the address in the add-box so the reply still has a target.
+          if (!anyTicked && opts.sender) {
+            document.getElementById('reply-extra').value = opts.sender;
+          }
+          dialog.showModal();
+          document.getElementById('reply-body').focus();
+        };
+
+        // To and Cc are a choice between two, not two independent ticks.
+        dialog.querySelectorAll('.reply-recipient').forEach(function(row) {
+          var boxes = row.querySelectorAll('input[type=checkbox]');
+          boxes.forEach(function(box) {
+            box.addEventListener('change', function() {
+              if (!box.checked) return;
+              boxes.forEach(function(other) {
+                if (other !== box) other.checked = false;
+              });
+            });
+          });
+        });
+
+        var closeDialog = function() { dialog.close(); };
+        openButton.addEventListener('click', function() { prepare(); });
+
+        // A reply button on each message in the expanded thread.
+        document.querySelectorAll('.reply-to-message').forEach(function(button) {
+          button.addEventListener('click', function() {
+            prepare({
+              receivedAt: button.dataset.receivedAt,
+              sender: button.dataset.senderEmail,
+              label: button.dataset.senderLabel,
+            });
+          });
+        });
+        dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
+        dialog.querySelector('.reply-cancel').addEventListener('click', closeDialog);
+        dialog.addEventListener('click', function(event) {
+          if (event.target === dialog) closeDialog();
+        });
+      })();
+    </script>
+  {% endif %}
+
+  {% if lead.status in editable_statuses and delete_enabled %}
+    <dialog class="forward-dialog" id="delete-dialog">
+      <form method="post" action="{{ url_for('delete_lead_email', lead_id=lead.id) }}">
+        <div class="forward-dialog-head">
+          <h3>Delete email</h3>
+          <button type="button" class="forward-dialog-close" aria-label="Close">&times;</button>
+        </div>
+        <p class="meta">Moves the email to Deleted Items in Outlook.</p>
+        {% if lead.message_lead_count > 1 %}
+          <p class="delete-dialog-warning">All {{ lead.message_lead_count }} leads pulled from this email will be dropped, not just this one.</p>
+        {% endif %}
+        <div class="actions forward-dialog-actions">
+          <button type="button" class="btn btn-secondary delete-cancel">Cancel</button>
+          <button type="submit" class="btn-reject">Delete email</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script>
+      (function() {
+        var dialog = document.getElementById('delete-dialog');
+        var openButton = document.getElementById('open-delete-dialog');
+        if (!dialog || !openButton) return;
+        var closeDialog = function() { dialog.close(); };
+        openButton.addEventListener('click', function() { dialog.showModal(); });
+        dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
+        dialog.querySelector('.delete-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
           if (event.target === dialog) closeDialog();
         });

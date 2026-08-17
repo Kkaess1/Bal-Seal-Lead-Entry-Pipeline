@@ -11,7 +11,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -34,6 +34,7 @@ def _approved_lead(db_path, extra=None):
         'market': 'INDUSTRIAL',
         'rank': 'Hot',
         'country': 'United States',
+        'assigned_tm': 'Bill Rost',
         **(extra or {}),
     }
     conn = db.get_connection(db_path)
@@ -54,6 +55,9 @@ def _mock_client(status_code=201, json_body=None, exc=None):
     if json_body is not None:
         mock_resp.json.return_value = json_body
     mock_session = MagicMock()
+    empty_lookup = MagicMock(status_code=200, text='')
+    empty_lookup.json.return_value = {'items': []}
+    mock_session.get.return_value = empty_lookup
     if exc is not None:
         mock_session.post.side_effect = exc
     else:
@@ -208,9 +212,9 @@ class BuildLeadPayloadTests(unittest.TestCase):
         self.assertEqual(client.country_format, 'code')
 
     def test_assigned_tm_sets_owner_party_name(self):
-        lead = {'assigned_tm': 'Daniel Smoliga', 'market': 'INDUSTRIAL'}
+        lead = {'assigned_tm': 'John Pan', 'market': 'INDUSTRIAL'}
         payload, _, _ = self._build(lead)
-        self.assertEqual(payload['OwnerPartyName'], 'Daniel Smoliga')
+        self.assertEqual(payload['OwnerPartyName'], 'John Pan')
 
     def test_no_assigned_tm_omits_owner(self):
         payload, _, _ = self._build({'market': 'INDUSTRIAL'})
@@ -280,6 +284,25 @@ class OracleLeadApiClientTests(unittest.TestCase):
         self.assertEqual(result['oracle_lead_number'], 'LN-0042')
         self.assertIsInstance(result['field_warnings'], list)
 
+    @patch('oracle_api.description_compactor.compact_description')
+    def test_overlong_description_is_compacted_before_post(self, compact):
+        compact.return_value = ('Important specifications retained.', 'ai')
+        client = _mock_client(
+            status_code=201,
+            json_body={'LeadId': 99, 'LeadNumber': 'LN-0042'},
+        )
+
+        result = client.submit_lead(
+            dict(self._lead(), lead_details='x' * 2001), 'Website/Email',
+            source_label='Inquiry',
+        )
+
+        compact.assert_called_once_with('x' * 2001)
+        posted = json.loads(client.session.post.call_args.kwargs['data'])
+        self.assertEqual(posted['Description'], 'Important specifications retained.')
+        self.assertTrue(any('2001' in warning and 'AI' in warning
+                            for warning in result['field_warnings']))
+
     def _website_client(self, first_status, first_text, second_status=201):
         """Client whose POST fails once then succeeds, for the website retry."""
         config = {
@@ -292,6 +315,9 @@ class OracleLeadApiClientTests(unittest.TestCase):
         accepted = MagicMock(status_code=second_status)
         accepted.json.return_value = {'LeadId': 99, 'LeadNumber': 'LN-0042'}
         session = MagicMock()
+        empty_lookup = MagicMock(status_code=200, text='')
+        empty_lookup.json.return_value = {'items': []}
+        session.get.return_value = empty_lookup
         session.post.side_effect = [rejected, accepted]
         return oracle_api.OracleLeadApiClient(
             config, username='u', password='p', session=session
@@ -353,6 +379,9 @@ class OracleLeadApiClientTests(unittest.TestCase):
         mock_resp.status_code = 201
         mock_resp.json.side_effect = ValueError('not json')
         mock_session = MagicMock()
+        empty_lookup = MagicMock(status_code=200, text='')
+        empty_lookup.json.return_value = {'items': []}
+        mock_session.get.return_value = empty_lookup
         mock_session.post.return_value = mock_resp
         client = oracle_api.OracleLeadApiClient(config, username='u', password='p', session=mock_session)
         with self.assertRaises(oracle_api.OracleApiError):
@@ -370,6 +399,9 @@ class OracleLeadApiClientTests(unittest.TestCase):
         mock_resp.status_code = 201
         mock_resp.json.return_value = {'LeadId': 1, 'LeadNumber': 'LN-001'}
         mock_session = MagicMock()
+        empty_lookup = MagicMock(status_code=200, text='')
+        empty_lookup.json.return_value = {'items': []}
+        mock_session.get.return_value = empty_lookup
         mock_session.post.return_value = mock_resp
         client = oracle_api.OracleLeadApiClient(config, username='myuser', password='mypass', session=mock_session)
         client.submit_lead(self._lead(), 'test')
@@ -428,6 +460,7 @@ class RunApiSubmitTests(unittest.TestCase):
             'market': 'INDUSTRIAL',
             'rank': 'Hot',
             'country': 'United States',
+            'assigned_tm': 'Bill Rost',
             **(extra or {}),
         }
         return db.insert_lead(lead, 'email_ai_extract', status='approved')
@@ -468,18 +501,15 @@ class RunApiSubmitTests(unittest.TestCase):
         self.assertEqual(lead['status'], 'approved')
         self.assertIsNotNone(lead['next_attempt_at'])
 
-    def test_network_error_schedules_retry(self):
-        """Network errors are wrapped as OracleApiError with status_code=None.
-        _run_api_submit should schedule a retry (same as 5xx) since the request
-        never reached Oracle -- it would be wrong to permanently fail a lead
-        because of a transient connection problem."""
+    def test_network_error_requires_reconciliation_before_retry(self):
+        """A lost POST response cannot prove that Oracle created nothing."""
         lead_id = self._insert_approved()
         client = _mock_client(exc=requests.ConnectionError('refused'))
         results = self._run(client)
         self.assertEqual(results['fail'], 1)
         lead = self._get_lead(lead_id)
-        self.assertEqual(lead['status'], 'approved')
-        self.assertIsNotNone(lead['next_attempt_at'])
+        self.assertEqual(lead['status'], 'submission_unknown')
+        self.assertIsNone(lead['next_attempt_at'])
 
     def test_double_claim_skips_second_run(self):
         """A lead already in 'submitting' state should not be double-claimed."""
@@ -961,7 +991,7 @@ class ExistingPartyLookupTests(unittest.TestCase):
         self.assertEqual(alert['severity'], 'warning')
         self.assertIn('Possible duplicate account', alert['headline'])
 
-    def test_lookup_failure_never_blocks_submission(self):
+    def test_lookup_failure_blocks_creation_so_it_can_retry_safely(self):
         session = MagicMock()
         session.get.side_effect = requests.RequestException('oracle down')
         post = MagicMock(); post.status_code = 201
@@ -972,21 +1002,21 @@ class ExistingPartyLookupTests(unittest.TestCase):
             username='u', password='p', session=session,
         )
 
-        result = client.submit_lead({'first_name': 'Ada', 'organization': 'ACME',
-                                     'email': 'a@acme.com', 'market': 'INDUSTRIAL'},
-                                    'Website/Email', source_label='Inquiry')
+        with self.assertRaises(oracle_api.OracleApiError) as ctx:
+            client.submit_lead({'first_name': 'Ada', 'organization': 'ACME',
+                                'email': 'a@acme.com', 'market': 'INDUSTRIAL'},
+                               'Website/Email', source_label='Inquiry')
 
-        self.assertTrue(result['success'])
-        sent = json.loads(session.post.call_args.kwargs['data'])
-        self.assertEqual(sent['EnableCreateAccount'], 'Y')
+        self.assertIn('lookup request failed', str(ctx.exception))
+        session.post.assert_not_called()
 
-    def test_non_200_lookup_is_treated_as_no_match(self):
+    def test_non_200_lookup_blocks_creation(self):
         bad = MagicMock(); bad.status_code = 400; bad.text = 'bad query'
         client = self._client([bad, bad, bad])
 
-        result = client.resolve_existing_party({'email': 'a@b.com', 'organization': 'ACME'})
-        self.assertEqual(result['match_basis'], 'none')
-        self.assertEqual(result['warnings'], [])
+        with self.assertRaises(oracle_api.OracleApiError) as ctx:
+            client.resolve_existing_party({'email': 'a@b.com', 'organization': 'ACME'})
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 class GreenCategoryGateTests(unittest.TestCase):
@@ -1064,7 +1094,8 @@ class LocalDuplicateGuardTests(unittest.TestCase):
     def _lead(self, **over):
         fields = {'first_name': 'Daniel', 'last_name': 'Rundlett',
                   'organization': 'Teledyne FLIR',
-                  'email': 'daniel.rundlett@teledyne.com', 'market': 'INDUSTRIAL'}
+                  'email': 'daniel.rundlett@teledyne.com', 'market': 'INDUSTRIAL',
+                  'country': 'United States', 'assigned_tm': 'Bill Rost'}
         fields.update(over)
         return db.insert_lead(fields, 'email_ai_extract', status='approved')
 
@@ -1078,7 +1109,9 @@ class LocalDuplicateGuardTests(unittest.TestCase):
         results = pipeline_submit._run_api_submit(client, db.list_ready_for_submission())
 
         client.session.post.assert_not_called()
-        self.assertEqual(results, {'ok': 1, 'fail': 0})
+        # 'returned' counts leads sent back to the Input Queue for a correction
+        # -- see db.return_lead_for_correction(). A duplicate is not one of them.
+        self.assertEqual(results, {'ok': 1, 'fail': 0, 'returned': 0})
         row = db.get_lead(second)
         self.assertEqual(row['status'], 'duplicate')
         self.assertEqual(row['duplicate_of_lead_id'], first)
@@ -1231,7 +1264,9 @@ class DedupQueryEscapingTests(unittest.TestCase):
 
     def test_apostrophe_in_project_name_is_escaped_and_sent_as_a_param(self):
         session = MagicMock()
-        session.get.return_value = _resp(500)
+        empty_lookup = _resp(200)
+        empty_lookup.json.return_value = {'items': []}
+        session.get.return_value = empty_lookup
         session.post.return_value = _resp(201, '')
         session.post.return_value.json.return_value = {'LeadId': 7}
         client = oracle_api.OracleLeadApiClient(

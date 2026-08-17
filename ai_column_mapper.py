@@ -1,5 +1,5 @@
 """
-AI-powered column header mapper using Claude.
+AI-powered column header mapper using OpenAI.
 Maps arbitrary Excel column headers to the pipeline's internal lead field names.
 Results are cached to disk so the same header set is never re-analyzed.
 """
@@ -87,13 +87,13 @@ def _save_cache(cache: dict):
 
 def map_columns_with_ai(headers: list[str], already_mapped: set[str], provider: str = None) -> dict[str, int]:
     """
-    Ask AI model (Claude or Gemini) to map unrecognized column headers to known field names.
+    Ask OpenAI to map unrecognized column headers to known field names.
 
     Parameters
     ----------
     headers       : full list of column headers from the Excel sheet (zero-based index implied)
     already_mapped: set of field names that alias-matching already resolved
-    provider      : 'claude', 'gemini', or None (auto-detected)
+    provider      : retained for compatibility; OpenAI is always used
 
     Returns
     -------

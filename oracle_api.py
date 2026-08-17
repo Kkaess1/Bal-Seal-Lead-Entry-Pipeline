@@ -14,6 +14,7 @@ from pathlib import Path
 import requests
 
 import country_codes
+import description_compactor
 import territory_map
 from phone_parser import parse_phone
 
@@ -99,10 +100,15 @@ MARKET_TO_API_VALUE = {
 
 
 class OracleApiError(RuntimeError):
-    def __init__(self, message, status_code=None, response_text=None):
+    def __init__(self, message, status_code=None, response_text=None,
+                 outcome_unknown=False):
         super().__init__(message)
         self.status_code = status_code
         self.response_text = response_text
+        # True only after a create request was sent but no authoritative
+        # response was received. Retrying such a request can create a second
+        # lead, so the submitter must reconcile it instead.
+        self.outcome_unknown = outcome_unknown
 
 
 def build_project_name(lead, trade_show_name, source_label='Tradeshow'):
@@ -114,6 +120,28 @@ def build_project_name(lead, trade_show_name, source_label='Tradeshow'):
         part for part in (org, name, source_label, trade_show_name)
         if part and str(part).strip()
     )
+
+
+def submission_blockers(lead):
+    """Human-fixable omissions that must not be guessed during submission."""
+    blockers = []
+    country = _clean(lead.get('country'))
+    state = _clean(lead.get('state'))
+    if country:
+        if not country_codes.to_alpha2(country):
+            blockers.append(
+                f'Country {country!r} is not recognized; correct it before sending.'
+            )
+    elif not _looks_like_us_state(state):
+        blockers.append(
+            'Country is missing and the state does not establish that this is a US lead.'
+        )
+    if not _clean(lead.get('assigned_tm')):
+        blockers.append(
+            'Territory Manager is unassigned; complete or correct the location, '
+            'or choose a manager manually.'
+        )
+    return blockers
 
 
 def _q_escape(value):
@@ -370,8 +398,12 @@ class OracleLeadApiClient:
         return f'{self.base_url}/crmRestApi/resources/{API_VERSION}/contacts'
 
     def _query(self, url, q, fields, limit=MAX_ACCOUNT_CANDIDATES):
-        """Read-only lookup. Returns [] on any failure -- never raises, because
-        a lookup is an optimisation and must not stop a lead being submitted."""
+        """Read-only lookup whose failure is distinct from "no matches".
+
+        Creating a new account after a transient lookup failure defeats the
+        lookup's duplicate-prevention purpose, so callers retry the submission
+        later instead of silently treating an outage as an empty result.
+        """
         try:
             resp = self.session.get(
                 url,
@@ -381,12 +413,16 @@ class OracleLeadApiClient:
                 timeout=self.timeout,
             )
             if resp.status_code != 200:
-                logger.warning('Oracle lookup failed (%s) for q=%s', resp.status_code, q)
-                return []
-            return resp.json().get('items') or []
+                raise OracleApiError(
+                    f'Oracle lookup failed ({resp.status_code}): {resp.text}',
+                    status_code=resp.status_code, response_text=resp.text,
+                )
+            try:
+                return resp.json().get('items') or []
+            except (ValueError, AttributeError) as e:
+                raise OracleApiError('Oracle lookup returned invalid JSON') from e
         except (requests.RequestException, ValueError) as e:
-            logger.warning('Oracle lookup errored for q=%s: %s', q, e)
-            return []
+            raise OracleApiError(f'Oracle lookup request failed: {e}') from e
 
     def find_contact_by_email(self, email):
         """The Oracle contact with this exact email, or None.
@@ -485,15 +521,10 @@ class OracleLeadApiClient:
         return result
 
     def submit_lead(self, lead, trade_show_name, source_label='Tradeshow'):
-        # Look up the company/contact in Oracle first, so the lead attaches to
-        # an existing account instead of creating a near-duplicate. Never fatal
-        # -- every lookup returns empty on failure and the lead goes out as a
-        # new account/contact exactly as it always did.
-        try:
-            existing = self.resolve_existing_party(lead)
-        except Exception as e:
-            logger.warning('Existing-party lookup failed; creating new: %s', e)
-            existing = None
+        # Look up the company/contact before creating anything. A lookup outage
+        # is not evidence that the party does not exist, so it is allowed to
+        # stop this attempt and be retried safely later.
+        existing = self.resolve_existing_party(lead)
 
         payload, project_name, warnings = build_lead_payload(
             lead, trade_show_name, source_label=source_label,
@@ -543,8 +574,35 @@ class OracleLeadApiClient:
                         'field_warnings': warnings + [f'Lead already exists in Oracle ({exist_num})'],
                         'response': existing,
                     }
-        except Exception as check_err:
-            logger.warning('Pre-submission Oracle dedup check warning: %s', check_err)
+            elif check_resp.status_code != 200:
+                raise OracleApiError(
+                    f'Oracle lead dedup lookup failed ({check_resp.status_code}): '
+                    f'{check_resp.text}', status_code=check_resp.status_code,
+                    response_text=check_resp.text,
+                )
+        except OracleApiError:
+            raise
+        except requests.RequestException as check_err:
+            raise OracleApiError(
+                f'Oracle lead dedup lookup request failed: {check_err}'
+            ) from check_err
+        except (ValueError, AttributeError) as check_err:
+            raise OracleApiError(
+                f'Oracle lead dedup lookup returned invalid JSON: {check_err}'
+            ) from check_err
+
+        description = payload.get('Description') or ''
+        if len(description) > description_compactor.ORACLE_DESCRIPTION_MAX_LENGTH:
+            compacted, method = description_compactor.compact_description(description)
+            payload['Description'] = compacted
+            warnings.append(
+                f'Lead Details compacted from {len(description)} to {len(compacted)} '
+                f'characters to fit Oracle ({"AI" if method == "ai" else "safe fallback"}).'
+            )
+            logger.info(
+                'Compacted Oracle Lead Details from %d to %d characters (%s).',
+                len(description), len(compacted), method,
+            )
 
         try:
             response = self.session.post(
@@ -555,7 +613,10 @@ class OracleLeadApiClient:
                 timeout=self.timeout,
             )
         except requests.RequestException as e:
-            raise OracleApiError(f'Oracle API request failed: {e}') from e
+            raise OracleApiError(
+                f'Oracle API request outcome is unknown: {e}',
+                outcome_unknown=True,
+            ) from e
 
         # The website attribute is the one field here whose writability could
         # not be confirmed from Oracle's metadata (leads/describe doesn't list
@@ -588,7 +649,10 @@ class OracleLeadApiClient:
                     timeout=self.timeout,
                 )
             except requests.RequestException as e:
-                raise OracleApiError(f'Oracle API request failed: {e}') from e
+                raise OracleApiError(
+                    f'Oracle API request outcome is unknown: {e}',
+                    outcome_unknown=True,
+                ) from e
 
         if response.status_code >= 400:
             raise OracleApiError(
@@ -600,12 +664,18 @@ class OracleLeadApiClient:
         try:
             data = response.json()
         except ValueError as e:
-            raise OracleApiError('Oracle API returned non-JSON success response') from e
+            raise OracleApiError(
+                'Oracle API returned a non-JSON success response; creation outcome is unknown',
+                outcome_unknown=True,
+            ) from e
 
         oracle_id = data.get('LeadId')
         lead_number = data.get('LeadNumber')
         if not oracle_id and not lead_number:
-            raise OracleApiError('Oracle API success response did not include LeadId or LeadNumber')
+            raise OracleApiError(
+                'Oracle API success response did not include LeadId or LeadNumber; '
+                'creation outcome is unknown', outcome_unknown=True,
+            )
 
         return {
             'success': True,
@@ -613,6 +683,9 @@ class OracleLeadApiClient:
             'oracle_record_id': str(oracle_id or lead_number),
             'oracle_lead_number': lead_number,
             'field_warnings': warnings,
+            # Preserve the exact final request (including any field removed
+            # after a tenant validation error) for the lead lifetime page.
+            'payload': payload,
             'response': data,
         }
 
@@ -744,4 +817,3 @@ class OracleLeadApiClient:
             file_name, oracle_lead_id, urls, last_error,
         )
         return False
-

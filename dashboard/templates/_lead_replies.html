@@ -1,0 +1,24 @@
+{# Replies sent to this lead from the dashboard. Outbound mail never comes back
+   through ingestion, so this log is the only trace that the customer has
+   already been written to -- shown wherever a lead is shown. #}
+{% if lead.replies %}
+  <div class="reply-log">
+    <div class="reply-log-head">
+      <span>✉️ Replied to {{ lead.display_name }}</span>
+      <span class="reply-log-count">{{ lead.replies|length }} sent</span>
+    </div>
+    {% for reply in lead.replies %}
+      <div class="reply-log-entry">
+        <div class="reply-log-meta">
+          <strong>To:</strong> {{ reply.recipients|join(', ') or '(recipient not recorded)' }}
+          {% if reply.cc_recipients %}
+            &middot; <strong>Cc:</strong> {{ reply.cc_recipients|join(', ') }}
+          {% endif %}
+          {% if reply.sent_at_display %}&middot; {{ reply.sent_at_display }}{% endif %}
+          {% if reply.sent_by %}&middot; by {{ reply.sent_by }}{% endif %}
+        </div>
+        <div class="reply-log-body">{{ reply.body }}</div>
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}

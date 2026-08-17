@@ -27,271 +27,1305 @@
       Palette pulled from balseal.com's own stylesheet (brandastic theme):
       #28495a brand navy (buttons/active states), #f05329 brand orange
       (CTA accents / underline motif), #0072ce link blue, #1a262b near-black
-      body text, #eeefef page background. Headings in Raleway, body in Noto
-      Sans, matching the fonts the site itself loads from Google Fonts.
+      body text. Headings in Raleway, body in Noto Sans, matching the fonts the
+      site itself loads from Google Fonts.
+
+      Order below is tokens -> base elements -> components. Sizes, spacing,
+      radii and durations all come from the scales in :root; a value that is
+      not on a scale is almost always a mistake. The scales themselves follow
+      Apple's SF/HIG tracking curve and Linear's spacing and motion tokens.
     */
     :root {
       color-scheme: light dark;
 
-      /* Neutrals */
+      /* --- Brand + neutrals (unchanged -- these are balseal.com's) --- */
       --bg: #dadcdb;
       --surface: #ffffff;
       --surface-2: #f7f7f7;
-      --border: #e2e4e3;
       --text: #1a262b;
       --text-muted: #5f6b70;
       --text-faint: #8996a3;
 
-      /* Brand */
       --navy: #28495a;
       --navy-hover: #1a262b;
       --orange: #f05329;
       --accent: #0072ce;
       --accent-hover: #005ba3;
 
-      /* Semantic (risk) */
-      --clear-bg: #eaf6e2; --clear-fg: #4c8f14; --clear-border: #b9e29a;
-      --review-bg: #fdece3; --review-fg: #d8471e; --review-border: #f6bfa5;
-      --reject-bg: #fbe7e5; --reject-fg: #c0392b; --reject-border: #f0b3ab;
+      /* Fill for solid neutral buttons (Reply / Forward). Separate from --navy
+         because --navy flips to a light tint in dark mode -- it is a text
+         colour there, and using it as a fill put white text on pale blue. */
+      --action-bg: #28495a;
+      --action-fg: #ffffff;
+
+      /* Six call sites already used --bg-card before it was ever declared, so
+         they rendered transparent. Defined here as the alias they meant. */
+      --bg-card: var(--surface);
+
+      /* --- Border hierarchy ---
+         Derived from --text with color-mix, so one declaration serves both
+         themes and the dark block never has to restate them. Previously every
+         edge in the app shared one flat --border, which is why nothing ever
+         receded and the page read as a wireframe. */
+      --border-hairline: color-mix(in srgb, var(--text) 7%, transparent);
+      --border: color-mix(in srgb, var(--text) 13%, transparent);
+      --border-strong: color-mix(in srgb, var(--text) 24%, transparent);
+
+      /* Tint washes for hover / selection. Same trick: theme-independent. */
+      --tint-hover: color-mix(in srgb, var(--text) 4%, transparent);
+      --tint-active: color-mix(in srgb, var(--text) 7%, transparent);
+      --tint-accent: color-mix(in srgb, var(--accent) 10%, transparent);
+
+      /* --- Status scale ---
+         Radix's model: step 3 tints a background, 6 draws its border, 9 is the
+         solid/dot fill, 11 is readable text on step 3. The same step number
+         means the same thing in both themes, so components are written once
+         and only these values swap. */
+      --clear-bg: #eaf6e2;  --clear-border: #b9e29a;  --clear-solid: #4c8f14;  --clear-fg: #3f7a10;
+      --review-bg: #fdece3; --review-border: #f6bfa5; --review-solid: #d8471e; --review-fg: #b03b18;
+      --reject-bg: #fbe7e5; --reject-border: #f0b3ab; --reject-solid: #c0392b; --reject-fg: #a12f21;
+      --info-bg: #e8f2fd;   --info-border: #bfdcf8;   --info-solid: #0072ce;   --info-fg: #0060ad;
 
       --success: #4c8f14; --success-hover: #3d7410;
-      --danger: #c0392b; --danger-hover: #a12f21;
+      --danger: #c0392b;  --danger-hover: #a12f21;
 
-      --radius: 10px;
-      --radius-sm: 6px;
-      --radius-pill: 50px;
-      --shadow: 0 1px 2px rgba(26, 38, 43, 0.06), 0 1px 3px rgba(26, 38, 43, 0.08);
+      /* --- Type scale ---
+         Base 15px, the dense-app standard (Linear ships 15px, not 16px).
+         Tracking follows Apple's curve: negative above 16px, tightening toward
+         -0.022em and stopping there; positive only on uppercase labels, which
+         genuinely need it. Weight and tracking trade off -- heavier strokes eat
+         their own optical space -- so the display weights sit near 600, not 800. */
+      --fs-display: 30px; --lh-display: 36px; --ls-display: -0.019em;
+      --fs-h1: 24px;      --lh-h1: 30px;      --ls-h1: -0.016em;
+      --fs-h2: 20px;      --lh-h2: 26px;      --ls-h2: -0.014em;
+      --fs-h3: 17px;      --lh-h3: 24px;      --ls-h3: -0.011em;
+      --fs-body: 15px;    --lh-body: 24px;    --ls-body: -0.008em;
+      --fs-sm: 13px;      --lh-sm: 20px;      --ls-sm: -0.005em;
+      --fs-cap: 12px;     --lh-cap: 16px;     --ls-cap: 0em;
+      --fs-label: 11px;   --lh-label: 14px;   --ls-label: 0.055em;
+
+      /* --- Spacing: 4pt grid ---
+         Related things sit 1-2 steps apart, sections 5-6. The old CSS put
+         nearly everything ~1rem apart, which erased grouping; the ratios here
+         are what actually communicate hierarchy. */
+      --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+      --s-5: 20px; --s-6: 24px; --s-8: 32px; --s-10: 40px;
+      --s-12: 48px; --s-16: 64px;
+
+      /* --- Radius ---
+         Radius tracks element size (~20-25% of the short dimension), and a
+         nested radius is the outer minus the padding, never equal to it. */
+      --r-xs: 4px; --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px;
+      --r-pill: 9999px;
+      /* Legacy names -- status.html and lead_lifecycle.html reference these. */
+      --radius: var(--r-lg);
+      --radius-sm: var(--r-sm);
+      --radius-pill: var(--r-pill);
+
+      /* --- Controls --- */
+      --control-h: 34px;
+      --control-h-sm: 28px;
+      --row-h: 40px;
+
+      /* --- Depth ---
+         Multi-layer with negative spread on the wide layers (a single blur
+         leaks a grey halo), and tinted toward the brand navy rather than pure
+         black, which is what keeps them from looking muddy. */
+      --shadow-xs: 0 1px 2px rgba(16, 42, 58, 0.05);
+      --shadow-sm: 0 1px 2px rgba(16, 42, 58, 0.05), 0 2px 4px -2px rgba(16, 42, 58, 0.05);
+      --shadow-md: 0 1px 2px rgba(16, 42, 58, 0.04), 0 4px 8px -4px rgba(16, 42, 58, 0.06),
+                   0 12px 20px -8px rgba(16, 42, 58, 0.06);
+      --shadow-lg: 0 1px 2px rgba(16, 42, 58, 0.04), 0 8px 16px -6px rgba(16, 42, 58, 0.08),
+                   0 24px 40px -12px rgba(16, 42, 58, 0.10);
+      --shadow-modal: 0 0 0 1px rgba(16, 42, 58, 0.06), 0 12px 24px -8px rgba(16, 42, 58, 0.12),
+                      0 32px 64px -16px rgba(16, 42, 58, 0.18);
+      /* Legacy name kept for status.html's .kpi. */
+      --shadow: var(--shadow-xs);
+
+      /* --- Motion ---
+         Decelerating curves for anything the operator initiated, because the
+         result should arrive fast and settle slow. Durations are short on
+         purpose: nothing in a review queue benefits from being watched. */
+      --ease-out: cubic-bezier(.25, .46, .45, .94);
+      --ease-out-quart: cubic-bezier(.25, 1, .5, 1);
+      --ease-out-expo: cubic-bezier(.19, 1, .22, 1);
+      --ease-in-out: cubic-bezier(.77, 0, .175, 1);
+      --ease-spring: cubic-bezier(.175, .885, .32, 1.1);
+      --t-micro: 100ms;
+      --t-hover: 160ms;
+      --t-state: 240ms;
+      --t-panel: 300ms;
     }
 
+    /* Dark theme restates only what cannot be derived: the raw surfaces, the
+       brand colours at their dark-mode luminance, and the status scale. Borders
+       and tints follow --text automatically via color-mix above. */
     :root[data-theme="dark"] {
       --bg: #12191d; --surface: #1a262b; --surface-2: #202f36;
-      --border: #2c3e46; --text: #eef2f3; --text-muted: #9aa8ad; --text-faint: #6b7d84;
-      --navy: #6f97ab; --navy-hover: #eef2f3; --orange: #ff8158; --accent: #4fa8e8; --accent-hover: #7cc2f5;
-      --clear-bg: #16321a; --clear-fg: #7ed957; --clear-border: #2d5a1a;
-      --review-bg: #3a2216; --review-fg: #ff9868; --review-border: #6e3a1e;
-      --reject-bg: #3a1613; --reject-fg: #ff7a68; --reject-border: #6e2620;
+      --text: #eef2f3; --text-muted: #9aa8ad; --text-faint: #6b7d84;
+      --navy: #6f97ab; --navy-hover: #eef2f3; --orange: #ff8158;
+      --accent: #4fa8e8; --accent-hover: #7cc2f5;
+      --action-bg: #33505f; --action-fg: #eef2f3;
+      --clear-bg: #16321a;  --clear-border: #2d5a1a;  --clear-solid: #5ba828;  --clear-fg: #7ed957;
+      --review-bg: #3a2216; --review-border: #6e3a1e; --review-solid: #e0632f; --review-fg: #ff9868;
+      --reject-bg: #3a1613; --reject-border: #6e2620; --reject-solid: #cf4436; --reject-fg: #ff7a68;
+      --info-bg: #10263a;   --info-border: #1d4a6b;   --info-solid: #2f8fdb; --info-fg: #6fc0f5;
+      --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.30);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.30), 0 2px 4px -2px rgba(0, 0, 0, 0.25);
+      --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.30), 0 8px 16px -8px rgba(0, 0, 0, 0.35);
+      --shadow-lg: 0 4px 8px rgba(0, 0, 0, 0.30), 0 16px 32px -12px rgba(0, 0, 0, 0.45);
+      --shadow-modal: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 24px 56px -16px rgba(0, 0, 0, 0.65);
     }
 
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) {
         --bg: #12191d; --surface: #1a262b; --surface-2: #202f36;
-        --border: #2c3e46; --text: #eef2f3; --text-muted: #9aa8ad; --text-faint: #6b7d84;
-        --navy: #6f97ab; --navy-hover: #eef2f3; --orange: #ff8158; --accent: #4fa8e8; --accent-hover: #7cc2f5;
-        --clear-bg: #16321a; --clear-fg: #7ed957; --clear-border: #2d5a1a;
-        --review-bg: #3a2216; --review-fg: #ff9868; --review-border: #6e3a1e;
-        --reject-bg: #3a1613; --reject-fg: #ff7a68; --reject-border: #6e2620;
+        --text: #eef2f3; --text-muted: #9aa8ad; --text-faint: #6b7d84;
+        --navy: #6f97ab; --navy-hover: #eef2f3; --orange: #ff8158;
+        --accent: #4fa8e8; --accent-hover: #7cc2f5;
+        --action-bg: #33505f; --action-fg: #eef2f3;
+        --clear-bg: #16321a;  --clear-border: #2d5a1a;  --clear-solid: #5ba828;  --clear-fg: #7ed957;
+        --review-bg: #3a2216; --review-border: #6e3a1e; --review-solid: #e0632f; --review-fg: #ff9868;
+        --reject-bg: #3a1613; --reject-border: #6e2620; --reject-solid: #cf4436; --reject-fg: #ff7a68;
+        --info-bg: #10263a;   --info-border: #1d4a6b;   --info-solid: #2f8fdb; --info-fg: #6fc0f5;
+        --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.30);
+        --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.30), 0 2px 4px -2px rgba(0, 0, 0, 0.25);
+        --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.30), 0 8px 16px -8px rgba(0, 0, 0, 0.35);
+        --shadow-lg: 0 4px 8px rgba(0, 0, 0, 0.30), 0 16px 32px -12px rgba(0, 0, 0, 0.45);
+        --shadow-modal: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 24px 56px -16px rgba(0, 0, 0, 0.65);
       }
     }
 
+    /* =========================================================================
+       BASE
+       ========================================================================= */
     * { box-sizing: border-box; }
-    body {
-      font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      margin: 0; background: var(--bg); color: var(--text);
-      line-height: 1.5; -webkit-font-smoothing: antialiased;
+
+    html {
+      font-optical-sizing: auto;
+      -webkit-text-size-adjust: 100%;
     }
 
-    .top-strip { background: #28495a; height: 8px; }
+    body {
+      font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+                   "Segoe UI", Roboto, Arial, sans-serif;
+      margin: 0; background: var(--bg); color: var(--text);
+      font-size: var(--fs-body); line-height: var(--lh-body); letter-spacing: var(--ls-body);
+      -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+      /* Lining figures of equal width, so IDs, dates and counts stop jittering
+         from row to row in the queue and history tables. */
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* One global motion contract. Everything below transitions named
+       properties only -- `all` re-diffs every computed property each frame and
+       will silently animate things nobody intended. */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-delay: 0ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+
+    /* =========================================================================
+       TYPOGRAPHY
+       ========================================================================= */
+    h2 {
+      font-family: 'Raleway', sans-serif;
+      font-size: var(--fs-h2); line-height: var(--lh-h2); letter-spacing: var(--ls-h2);
+      font-weight: 700; color: var(--text); margin: 0 0 var(--s-3);
+      text-wrap: balance;
+    }
+    /* The orange rule under a section head is balseal.com's own motif. Kept,
+       but as a hairline accent rather than a 3px slab. */
+    h2::after {
+      content: ''; display: block; width: 28px; height: 2px;
+      background: var(--orange); border-radius: 1px; margin-top: var(--s-2);
+    }
+    h3 {
+      font-family: 'Raleway', sans-serif;
+      font-size: var(--fs-h3); line-height: var(--lh-h3); letter-spacing: var(--ls-h3);
+      font-weight: 600; margin: 0 0 var(--s-1); text-wrap: balance;
+    }
+    h4 {
+      font-size: var(--fs-sm); line-height: var(--lh-sm); letter-spacing: 0;
+      font-weight: 600; margin: 0 0 var(--s-2);
+    }
+
+    .meta {
+      color: var(--text-muted);
+      font-size: var(--fs-sm); line-height: var(--lh-sm); letter-spacing: var(--ls-sm);
+      margin: 2px 0;
+    }
+    .meta strong { color: var(--text); font-weight: 600; }
+    .text-warn { color: var(--review-fg); font-weight: 600; }
+    .detail-error { margin: var(--s-1) 0; color: var(--reject-fg); }
+    .field-name {
+      font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+      font-size: var(--fs-cap); color: var(--text-muted); white-space: nowrap;
+    }
+
+    /* =========================================================================
+       CHROME: strip, header, nav, main
+       ========================================================================= */
+    .top-strip { background: #28495a; height: 6px; }
 
     header {
       /* Always white, regardless of theme: the logo wordmark is solid black
          and needs a light plate behind it to stay legible in dark mode. */
-      background: #fff; border-bottom: 3px solid var(--orange);
-      padding: 0 1.5rem; display: flex; align-items: center; gap: 1.75rem;
+      background: rgba(255, 255, 255, 0.88);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 1px solid rgba(26, 38, 43, 0.10);
+      box-shadow: 0 1px 0 rgba(240, 83, 41, 0.85);
+      padding: 0 var(--s-6); display: flex; align-items: center; gap: var(--s-6);
+      position: sticky; top: 0; z-index: 50;
+    }
+    /* Without a backdrop-filter the header would be 88% transparent and the
+       queue would scroll visibly through it. */
+    @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+      header { background: #fff; }
     }
     header .brand { margin-right: auto; display: flex; align-items: center; }
-    header .brand img { height: 104px; width: auto; display: block; }
-    header nav { display: flex; gap: 1.5rem; }
-    /* Fixed (theme-invariant) colors here too, to stay legible on the
-       always-white header background. */
-    header a {
-      color: #5f6b70; text-decoration: none; font-size: 0.92rem; font-weight: 600;
-      padding: 0.25rem 0; border-bottom: 2px solid transparent; transition: color 0.2s ease, border-color 0.2s ease;
+    header .brand img {
+      height: 84px; width: auto; display: block;
+      transition: opacity var(--t-hover) var(--ease-out);
     }
-    header a.active { color: #28495a; border-bottom-color: var(--orange); }
-    header a:hover { color: #28495a; }
+    header nav { display: flex; align-items: center; gap: var(--s-1); }
 
-    main { max-width: 1100px; margin: 0 auto; padding: 1.75rem 1.5rem 4rem; }
-    main a { color: var(--accent); }
-    main a:hover { color: var(--accent-hover); }
-
-    h2 {
-      font-family: 'Raleway', sans-serif; font-size: 1.35rem; font-weight: 800;
-      letter-spacing: 0.01em; color: var(--text); margin: 0 0 0.6rem; position: relative;
+    /* Fixed (theme-invariant) colours here too, to stay legible on the
+       always-light header plate. The active tab is marked by a 2px rule that
+       animates in from the centre; the label's weight never changes, because a
+       weight change reflows the row and shifts every sibling. */
+    header nav > a {
+      position: relative;
+      color: #5f6b70; text-decoration: none;
+      font-size: var(--fs-sm); font-weight: 500; letter-spacing: 0;
+      padding: var(--s-2) var(--s-3); border-radius: var(--r-sm);
+      display: inline-flex; align-items: center; gap: var(--s-2);
+      transition: color var(--t-micro) var(--ease-out),
+                  background-color var(--t-micro) var(--ease-out);
     }
-    h2::after { content: ''; display: block; width: 42px; height: 3px; background: var(--orange); margin-top: 0.5rem; }
-    h3 { font-family: 'Raleway', sans-serif; font-size: 1.05rem; font-weight: 700; margin: 0 0 0.2rem; }
+    header nav > a::after {
+      content: ''; position: absolute; left: var(--s-3); right: var(--s-3); bottom: -1px;
+      height: 2px; background: var(--orange); border-radius: 1px;
+      transform: scaleX(0); transform-origin: center;
+      transition: transform var(--t-state) var(--ease-out-quart);
+    }
+    header nav > a.active { color: #28495a; }
+    header nav > a.active::after { transform: scaleX(1); }
+    @media (any-hover: hover) {
+      header nav > a:hover { color: #28495a; background: rgba(26, 38, 43, 0.05); }
+    }
+    /* Counts beside a nav label are information, not a notification -- muted
+       and tabular, never a solid badge. */
+    header nav .nav-count {
+      font-size: var(--fs-cap); font-weight: 600; color: #8996a3;
+      font-variant-numeric: tabular-nums;
+    }
 
+    main {
+      max-width: 1100px; margin: 0 auto;
+      padding: var(--s-8) var(--s-6) var(--s-16);
+    }
+    main a { color: var(--accent); text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); text-underline-offset: 2px; }
+    main a:hover { color: var(--accent-hover); text-decoration-color: currentColor; }
+
+    .page-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: var(--s-4); flex-wrap: wrap; margin-bottom: var(--s-6);
+    }
+    .page-head h2 { margin: 0; }
+
+    /* =========================================================================
+       FOCUS
+       ========================================================================= */
+    /* :focus-visible, not :focus -- the old rule fired the ring on every mouse
+       click, which on a twenty-field review form is constant visual noise.
+       outline (not box-shadow) follows border-radius in modern browsers and
+       survives Windows forced-colors mode. */
+    :focus { outline: none; }
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: var(--r-sm);
+    }
+
+    /* =========================================================================
+       CARDS
+       ========================================================================= */
+    /* Border or shadow, not both. The old card carried a 1px border, a
+       two-layer shadow and a 3px left rail simultaneously -- three competing
+       edge treatments, which is most of why it read heavy. The risk rail is
+       the one accent that survives. */
     .card {
-      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-      box-shadow: var(--shadow); padding: 1.1rem 1.3rem; margin-bottom: 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      padding: var(--s-4) var(--s-5);
+      margin-bottom: var(--s-3);
       border-left: 3px solid var(--border);
+      transition: border-color var(--t-hover) var(--ease-out),
+                  box-shadow var(--t-hover) var(--ease-out),
+                  transform var(--t-hover) var(--ease-out);
     }
-    .card.risk-clear { border-left-color: var(--clear-fg); }
-    .card.risk-review { border-left-color: var(--review-fg); }
-    .card.risk-reject { border-left-color: var(--reject-fg); }
+    .card.risk-clear { border-left-color: var(--clear-solid); }
+    .card.risk-review { border-left-color: var(--review-solid); }
+    .card.risk-reject { border-left-color: var(--reject-solid); }
 
-    .meta { color: var(--text-muted); font-size: 0.85rem; margin: 0.15rem 0; }
-    .meta strong { color: var(--text); font-weight: 600; }
+    @media (any-hover: hover) {
+      .card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
+      .card.risk-clear:hover { border-left-color: var(--clear-solid); }
+      .card.risk-review:hover { border-left-color: var(--review-solid); }
+      .card.risk-reject:hover { border-left-color: var(--reject-solid); }
+    }
 
+    .card-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: var(--s-3); margin-bottom: var(--s-2);
+    }
+    .card-head h3 { margin: 0; }
+    .card-head h3 a {
+      color: var(--text); text-decoration: none;
+      transition: color var(--t-micro) var(--ease-out);
+    }
+    .card-head h3 a:hover { color: var(--navy); }
+
+    /* =========================================================================
+       BADGES
+       ========================================================================= */
+    /* 999px + uppercase + weight 700 reads as a marketing tag; a small radius
+       at weight 500 reads as system state. Fixed height with line-height 1
+       keeps every pill identical whether or not it holds an icon. */
     .badge {
-      display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px;
-      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase;
-      margin-right: 0.35rem; margin-bottom: 0.3rem; border: 1px solid transparent;
+      display: inline-flex; align-items: center; gap: 5px;
+      height: 20px; padding: 0 7px;
+      border-radius: var(--r-xs);
+      font-size: var(--fs-cap); font-weight: 500; letter-spacing: 0;
+      text-transform: none; line-height: 1; white-space: nowrap;
+      border: 1px solid transparent;
+      margin-right: var(--s-1); margin-bottom: var(--s-1);
+      vertical-align: middle;
     }
     .badge-clear { background: var(--clear-bg); color: var(--clear-fg); border-color: var(--clear-border); }
     .badge-review { background: var(--review-bg); color: var(--review-fg); border-color: var(--review-border); }
     .badge-reject { background: var(--reject-bg); color: var(--reject-fg); border-color: var(--reject-border); }
     .badge-reason {
       background: var(--surface-2); color: var(--text-muted); border-color: var(--border);
-      font-weight: 600; text-transform: none; letter-spacing: 0; cursor: help;
+      font-weight: 500; cursor: help;
     }
 
-    .actions { margin-top: 0.9rem; display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    /* =========================================================================
+       BUTTONS
+       ========================================================================= */
+    /* line-height equal to height with no vertical padding gives a predictable
+       box regardless of font metrics. Hover is a brightness filter rather than
+       a per-variant colour token, so one rule covers every variant; press adds
+       a small scale so the click has a physical answer. */
     button, .btn {
-      border: 1.5px solid transparent; border-radius: var(--radius-pill); padding: 0.5rem 1.3rem;
-      font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
-      cursor: pointer; text-decoration: none;
-      display: inline-flex; align-items: center; gap: 0.35rem; transition: filter 0.15s ease, background 0.15s ease, color 0.15s ease;
+      -webkit-appearance: none; appearance: none;
+      display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2);
+      height: var(--control-h); line-height: var(--control-h);
+      padding: 0 var(--s-4);
+      border: 1px solid transparent; border-radius: var(--r-md);
+      font-family: inherit; font-size: var(--fs-sm); font-weight: 600;
+      letter-spacing: 0; text-transform: none; text-decoration: none;
+      white-space: nowrap; cursor: pointer;
+      -webkit-user-select: none; user-select: none;
+      transition: var(--t-hover) var(--ease-out);
+      transition-property: background-color, border-color, color, box-shadow, filter, transform, opacity;
     }
-    button:hover, .btn:hover { filter: brightness(1.06); }
-    button:active, .btn:active { filter: brightness(0.94); }
-    .btn-approve { background: var(--success); color: #fff; }
+    @media (any-hover: hover) {
+      button:not(:disabled):hover, .btn:hover { filter: brightness(1.08); }
+    }
+    button:not(:disabled):active, .btn:active {
+      filter: brightness(0.96); transform: scale(0.97);
+      transition-duration: var(--t-micro);
+    }
+    button:disabled, .btn[aria-disabled="true"] {
+      opacity: 0.45; cursor: not-allowed; filter: none; transform: none;
+    }
+
+    .btn-approve { background: var(--success); color: #fff; box-shadow: var(--shadow-xs); }
     .btn-approve:hover { background: var(--success-hover); }
-    .btn-reject { background: var(--danger); color: #fff; }
+    .btn-reject { background: var(--danger); color: #fff; box-shadow: var(--shadow-xs); }
     .btn-reject:hover { background: var(--danger-hover); }
     .btn-secondary {
-      background: transparent; color: var(--navy); border-color: var(--navy);
+      background: var(--surface); color: var(--navy); border-color: var(--border-strong);
     }
-    .btn-secondary:hover { background: var(--navy); color: #fff; filter: none; }
+    @media (any-hover: hover) {
+      .btn-secondary:hover {
+        background: var(--surface-2); border-color: var(--navy); color: var(--navy); filter: none;
+      }
+    }
 
-    .empty { color: var(--text-muted); padding: 3rem 0; text-align: center; font-size: 0.95rem; }
-    .text-warn { color: var(--review-fg); font-weight: 600; }
+    /* A button that belongs inside a line of text rather than an action bar --
+       the Territory row's HQ lookup sits beside the word "Unassigned". */
+    .btn-inline {
+      height: auto; line-height: 1.4; padding: 1px var(--s-2);
+      font-size: var(--fs-cap); margin-left: var(--s-2);
+    }
 
-    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.35rem; }
-    .card-head h3 { margin: 0; }
-    .card-head h3 a { color: var(--text); text-decoration: none; }
-    .card-head h3 a:hover { color: var(--navy); }
-    .field-name { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; color: var(--text-muted); white-space: nowrap; }
+    .actions {
+      margin-top: var(--s-4); display: flex; gap: var(--s-2); flex-wrap: wrap;
+      align-items: center;
+    }
 
-    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-    th { text-align: left; padding: 0.55rem 0.7rem; color: var(--navy); font-weight: 700; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; border-bottom: 1px solid var(--border); }
-    td { text-align: left; padding: 0.6rem 0.7rem; border-bottom: 1px solid var(--border); }
+    /* =========================================================================
+       TABLES
+       ========================================================================= */
+    table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+    th {
+      text-align: left; padding: var(--s-2) var(--s-3);
+      color: var(--text-muted); font-weight: 500;
+      font-size: var(--fs-cap); letter-spacing: 0; text-transform: none;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    td {
+      text-align: left; padding: var(--s-2) var(--s-3);
+      border-bottom: 1px solid var(--border-hairline);
+      line-height: var(--lh-sm);
+    }
     tr:last-child td { border-bottom: none; }
 
-    label { display: block; font-size: 0.78rem; font-weight: 600; color: var(--text-muted); margin: 0.7rem 0 0.3rem; text-transform: uppercase; letter-spacing: 0.02em; }
-    input[type=text], input[type=email], textarea {
-      width: 100%; box-sizing: border-box; padding: 0.5rem 0.65rem; border: 1px solid var(--border);
-      border-radius: var(--radius-sm); font-size: 0.9rem; font-family: inherit;
-      background: var(--surface); color: var(--text);
+    table.kv-table { width: auto; min-width: 60%; border-collapse: collapse; }
+    table.kv-table td {
+      padding: var(--s-2) var(--s-3); border-bottom: 1px solid var(--border-hairline);
+      font-size: var(--fs-sm); vertical-align: top;
     }
-    input[type=text]:focus, input[type=email]:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-    textarea { min-height: 5rem; line-height: 1.55; resize: vertical; }
+    table.kv-table tr:last-child td { border-bottom: none; }
+    table.kv-table td:first-child {
+      font-weight: 500; color: var(--text-muted); white-space: nowrap; width: 118px;
+    }
 
-    /* --- Forward original email --- */
-    .lead-detail-card { position: relative; padding-bottom: 4.5rem; }
-    .lead-forward-card { position: relative; padding-bottom: 4.5rem; }
-    .forward-fab {
-      position: absolute; right: 1.25rem; bottom: 1.1rem; width: 42px; height: 42px;
-      padding: 0; justify-content: center; border-radius: 50%;
-      background: var(--navy); color: #fff; box-shadow: 0 4px 12px rgba(26,38,43,0.2);
+    table.lead-table { width: 100%; margin-top: var(--s-3); }
+    table.lead-table tr.row-risk-clear td:first-child { box-shadow: inset 2px 0 0 var(--clear-solid); }
+    table.lead-table tr.row-risk-review td:first-child { box-shadow: inset 2px 0 0 var(--review-solid); }
+    table.lead-table tr.row-risk-reject td:first-child { box-shadow: inset 2px 0 0 var(--reject-solid); }
+    table.lead-table td.details-cell {
+      white-space: pre-line; line-height: 1.6;
+      max-width: 600px; word-break: break-word; overflow-wrap: anywhere;
     }
-    .forward-fab svg { width: 21px; height: 21px; }
+
+    .history-wrap { padding: var(--s-2) var(--s-1); overflow-x: auto; }
+    .history-table {
+      width: 100%; min-width: 1010px; border-collapse: collapse;
+      font-size: var(--fs-sm); table-layout: fixed;
+    }
+    /* Deliberately not position:sticky. The table sits inside .history-wrap,
+       an overflow-x container with no vertical scrollport of its own, so a
+       sticky thead has nothing to stick to and only mispositions itself. An
+       inset shadow rather than border-bottom because a border on a th detaches
+       under border-collapse. */
+    .history-table thead th {
+      background: var(--surface);
+      border-bottom: none; box-shadow: inset 0 -1px 0 var(--border);
+    }
+    .history-table tbody tr {
+      transition: background-color var(--t-micro) linear;
+    }
+    @media (any-hover: hover) {
+      .history-table tbody tr:hover { background: var(--tint-hover); }
+    }
+    .history-table td {
+      padding: var(--s-3) var(--s-2); vertical-align: top; overflow-wrap: anywhere;
+      border-bottom: 1px solid var(--border-hairline);
+    }
+    .history-actions {
+      display: flex; flex-direction: column; align-items: flex-end; gap: var(--s-2);
+    }
+    .history-actions form { margin: 0; }
+    .history-actions button {
+      height: var(--control-h-sm); line-height: var(--control-h-sm);
+      font-size: var(--fs-cap); padding: 0 var(--s-3); white-space: nowrap;
+    }
+
+    .pagination {
+      display: flex; justify-content: center; align-items: center;
+      gap: var(--s-4); margin-top: var(--s-6);
+      font-size: var(--fs-sm); color: var(--text-muted);
+    }
+
+    /* =========================================================================
+       FORMS
+       ========================================================================= */
+    /* Labels lose the uppercase and the muted grey: a label should be quieter
+       in size than its value, not washed out to the point of inverting the
+       hierarchy. Uppercase on every label above every field was the single
+       strongest dated-admin-panel signal in this file. */
+    label {
+      display: block;
+      font-size: var(--fs-cap); line-height: var(--lh-cap); font-weight: 500;
+      letter-spacing: 0; text-transform: none;
+      color: var(--text); margin: 0 0 var(--s-2);
+    }
+
+    input[type=text], input[type=email], input[type=tel], input[type=number],
+    input[type=date], input[type=password], select, textarea {
+      width: 100%; box-sizing: border-box;
+      height: var(--control-h); padding: 0 var(--s-3);
+      border: 1px solid var(--border); border-radius: var(--r-sm);
+      font-family: inherit; font-size: var(--fs-sm); color: var(--text);
+      background: var(--surface);
+      transition: border-color var(--t-micro) var(--ease-out),
+                  box-shadow var(--t-micro) var(--ease-out);
+    }
+    textarea {
+      height: auto; min-height: 80px; padding: var(--s-2) var(--s-3);
+      line-height: 1.55; resize: vertical;
+    }
+    @media (any-hover: hover) {
+      input[type=text]:hover, input[type=email]:hover, input[type=tel]:hover,
+      input[type=number]:hover, input[type=date]:hover, select:hover, textarea:hover {
+        border-color: var(--border-strong);
+      }
+    }
+    input:focus-visible, select:focus-visible, textarea:focus-visible {
+      border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px;
+    }
+    ::placeholder { color: var(--text-faint); opacity: 1; }
+
+    .edit-section {
+      border: 0; border-top: 1px solid var(--border);
+      margin: var(--s-6) 0 0; padding: var(--s-5) 0 0;
+    }
+    .edit-section legend {
+      padding: 0 var(--s-3) 0 0; color: var(--text);
+      font-family: 'Raleway', sans-serif; font-size: var(--fs-sm); font-weight: 700;
+    }
+    .edit-grid {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--s-4) var(--s-5);
+    }
+    .edit-field {
+      display: flex; flex-direction: column; gap: var(--s-2); min-width: 0;
+      color: var(--text); font-size: var(--fs-cap); font-weight: 500;
+    }
+    .edit-field-wide { grid-column: 1 / -1; }
+    .edit-field input, .edit-field textarea, .edit-field select {
+      font: inherit; font-size: var(--fs-sm); color: var(--text);
+    }
+    .edit-field textarea { min-height: 90px; resize: vertical; }
+    .edit-field small {
+      font-weight: 400; font-size: var(--fs-cap); color: var(--text-muted);
+      overflow-wrap: anywhere;
+    }
+
+    /* =========================================================================
+       EMPTY STATES
+       ========================================================================= */
+    /* No border, no background, no card: a box drawn around emptiness draws
+       the eye to the void. The surrounding page already supplies the frame. */
+    .empty {
+      display: grid; justify-items: center; gap: var(--s-2);
+      padding: var(--s-16) var(--s-6); text-align: center;
+      color: var(--text-muted); font-size: var(--fs-sm);
+    }
+    .empty-container {
+      display: grid; justify-items: center; gap: var(--s-3);
+      max-width: 460px; margin: var(--s-16) auto; padding: var(--s-10) var(--s-6);
+      text-align: center; color: var(--text-muted);
+    }
+    .empty-container h3 {
+      margin: 0; font-size: var(--fs-h3); font-weight: 600; color: var(--text);
+    }
+
+    /* =========================================================================
+       LEAD DETAIL: email actions
+       ========================================================================= */
+    .lead-detail-card { position: relative; padding-bottom: var(--s-16); }
+    /* Labelled rather than icon-only: reply and forward are the same arrow
+       mirrored, and at icon size no two glyphs told them apart reliably. The
+       word does. Delete is the only one in the danger colour and sits at the
+       far end, so the destructive action is never nearest the thumb. */
+    .email-actions {
+      position: absolute; right: var(--s-5); bottom: var(--s-4);
+      display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s-2);
+    }
+    /* On a review card these sit in the .actions row itself, pushed to its
+       right end, so they line up with Approve/Reject rather than hanging a row
+       below them in the card's bottom corner. */
+    .lead-forward-card .email-actions {
+      position: static; margin-left: auto; align-self: center;
+    }
+    /* Closed, Notes is one more pill on that row. Open, it claims the line
+       below -- order puts it after the email buttons so it wraps past them
+       rather than through them -- where the textarea gets the card's width. */
+    .lead-notes { margin: 0; }
+    .lead-notes[open] { width: 100%; order: 10; }
+    /* A <summary> carrying .btn needs its marker suppressed and its display
+       forced, or the browser's own disclosure triangle sits inside the pill. */
+    .lead-notes > summary { list-style: none; display: inline-flex; }
+    .lead-notes > summary::-webkit-details-marker { display: none; }
+    .lead-notes-body { margin-top: var(--s-3); width: 100%; }
+    .lead-notes-body textarea { min-height: 80px; }
+    .email-action {
+      padding: 0 var(--s-4); gap: var(--s-2);
+      background: var(--action-bg); color: var(--action-fg); box-shadow: var(--shadow-xs);
+    }
+    .email-action svg { width: 16px; height: 16px; flex: none; }
+    .email-action-danger { background: var(--danger); }
+
+    /* =========================================================================
+       REPLY / RECIPIENTS
+       ========================================================================= */
+    .delete-dialog-warning { color: var(--reject-fg); font-weight: 600; }
+    .reply-dialog-to { font-weight: 600; color: var(--text); }
+    .reply-dialog-checkbox {
+      display: flex; align-items: center; gap: var(--s-2); margin-top: var(--s-3);
+      font-size: var(--fs-sm); font-weight: 500; color: var(--text-muted);
+      text-transform: none; letter-spacing: 0;
+    }
+    .reply-dialog-checkbox input { width: auto; height: auto; margin: 0; }
+    .reply-recipients {
+      display: flex; flex-direction: column; gap: 2px;
+      max-height: 11rem; overflow-y: auto; overflow-x: hidden; margin-top: var(--s-1);
+      border: 1px solid var(--border); border-radius: var(--r-sm);
+      background: var(--surface-2); padding: var(--s-2);
+    }
+    /* Wraps rather than scrolling sideways: a long address used to push a
+       horizontal scrollbar under the list. */
+    .reply-recipient {
+      display: flex; align-items: baseline; gap: var(--s-2); margin: 0; min-width: 0;
+      flex-wrap: wrap; padding: var(--s-1) var(--s-1); font-size: var(--fs-sm); font-weight: 400;
+      text-transform: none; letter-spacing: 0; color: var(--text); cursor: pointer;
+      border-radius: var(--r-xs);
+      transition: background-color var(--t-micro) var(--ease-out);
+    }
+    .reply-recipient:hover { background: var(--surface); }
+    .reply-recipient input { width: auto; height: auto; margin: 0; flex: none; }
+    .reply-recipient-modes { display: flex; gap: var(--s-2); flex: none; }
+    .reply-recipient-modes label {
+      display: inline-flex; align-items: center; gap: var(--s-1); margin: 0;
+      font-size: var(--fs-cap); font-weight: 500; text-transform: none;
+      letter-spacing: 0; color: var(--text-muted); cursor: pointer;
+    }
+    .reply-recipient-modes input:checked + *, .reply-recipient-modes label:has(input:checked) {
+      color: var(--navy);
+    }
+    .reply-recipient-who { font-weight: 600; }
+    .reply-recipient-addr {
+      color: var(--text-muted); font-size: var(--fs-cap);
+      min-width: 0; overflow-wrap: anywhere;
+    }
+    .reply-add-hint { margin: var(--s-2) 0 0; font-size: var(--fs-cap); color: var(--text-muted); }
+    .thread-msg-from {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: var(--s-3); flex-wrap: wrap;
+    }
+    .thread-msg-from .reply-to-message {
+      height: 24px; line-height: 24px; padding: 0 var(--s-3);
+      font-size: var(--fs-cap); flex: none;
+    }
+    .reply-others {
+      margin: var(--s-3) 0 0; padding: var(--s-2) var(--s-3); border-radius: var(--r-sm);
+      background: var(--surface-2); border: 1px solid var(--border-hairline);
+      font-size: var(--fs-sm); line-height: 1.5; color: var(--text);
+      word-break: break-word;
+    }
+    .reply-others-title { color: var(--navy); font-weight: 600; }
+
+    /* =========================================================================
+       ADDRESS AUTOCOMPLETE
+       ========================================================================= */
+    .address-autocomplete-wrapper { position: relative; width: 100%; }
+    .address-suggestions {
+      position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 100;
+      height: 12rem; overflow-y: auto;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--surface); box-shadow: var(--shadow-lg);
+      animation: pop-in var(--t-state) var(--ease-out-quart) both;
+    }
+    .address-suggestion {
+      display: flex; align-items: baseline; gap: var(--s-2); width: 100%;
+      height: auto; line-height: 1.4;
+      padding: var(--s-2) var(--s-3); border: 0; border-radius: 0; background: transparent;
+      text-align: left; font-size: var(--fs-sm); font-weight: 400; text-transform: none;
+      letter-spacing: 0; color: var(--text); cursor: pointer;
+    }
+    .address-suggestion:hover, .address-suggestion.is-active {
+      background: var(--tint-hover); filter: none; transform: none;
+    }
+    .address-suggestion-address { font-weight: 600; overflow-wrap: anywhere; }
+    .address-suggestion-name { color: var(--text-muted); }
+
+    /* =========================================================================
+       ATTACHMENT CHIPS (Outlook-style)
+       ========================================================================= */
+    .attachment-chips { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+    .attachment-chip {
+      display: inline-flex; align-items: center; gap: var(--s-2); max-width: 100%;
+      padding: var(--s-1) var(--s-3); border: 1px solid var(--border);
+      border-radius: var(--r-sm); background: var(--surface-2);
+      color: var(--text); text-decoration: none; font-size: var(--fs-sm);
+      transition: border-color var(--t-micro) var(--ease-out),
+                  background-color var(--t-micro) var(--ease-out);
+    }
+    .attachment-chip:hover { border-color: var(--border-strong); background: var(--surface); }
+    .attachment-chip svg { width: 15px; height: 15px; flex: none; color: var(--text-muted); }
+    .attachment-name { font-weight: 500; overflow-wrap: anywhere; }
+    .attachment-meta { color: var(--text-muted); font-size: var(--fs-cap); white-space: nowrap; }
+    .attachment-outlook-btn {
+      height: var(--control-h-sm); line-height: var(--control-h-sm);
+      padding: 0 var(--s-3); font-size: var(--fs-cap);
+    }
+
+    /* =========================================================================
+       REFERENCE DOCUMENTS
+       ========================================================================= */
+    /* The one place uppercase earns its keep: an 11px section eyebrow, where
+       positive tracking is genuinely required for legibility. */
+    .reference-section {
+      margin: var(--s-8) 0 var(--s-3);
+      font-size: var(--fs-label); line-height: var(--lh-label);
+      font-weight: 600; text-transform: uppercase; letter-spacing: var(--ls-label);
+      color: var(--text-faint);
+    }
+    .reference-path {
+      font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+      font-size: var(--fs-cap);
+      background: var(--surface-2); border: 1px solid var(--border-hairline);
+      border-radius: var(--r-xs); padding: 2px var(--s-2); word-break: break-all;
+    }
+    .reference-upload {
+      margin: 0 0 var(--s-5); padding: var(--s-4) var(--s-5);
+      background: var(--surface); border: 1.5px dashed var(--border-strong);
+      border-radius: var(--r-lg);
+      transition: border-color var(--t-hover) var(--ease-out),
+                  background-color var(--t-hover) var(--ease-out);
+    }
+    .reference-upload-active { border-color: var(--accent); background: var(--tint-accent); }
+    .reference-upload-row { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; }
+    .reference-upload-row input[type=file] {
+      flex: 1 1 18rem; width: auto; height: auto; padding: 0;
+      border: 0; background: none; font-size: var(--fs-sm);
+    }
+    .reference-upload-hint { margin: var(--s-2) 0 0; font-size: var(--fs-cap); color: var(--text-muted); }
+
+    /* File list: names first, preview only when one is opened. */
+    .file-group {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r-lg); overflow: hidden; margin-bottom: var(--s-5);
+    }
+    .file-row + .file-row { border-top: 1px solid var(--border-hairline); }
+    .file-summary {
+      display: flex; align-items: center; gap: var(--s-2);
+      padding: var(--s-3) var(--s-4); cursor: pointer; list-style: none;
+      transition: background-color var(--t-micro) var(--ease-out);
+    }
+    .file-summary::-webkit-details-marker { display: none; }
+    .file-summary:hover { background: var(--tint-hover); }
+    .file-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .file-row[open] > .file-summary { background: var(--surface-2); }
+    .file-chevron, .file-icon { display: flex; flex: none; color: var(--text-muted); }
+    .file-chevron svg {
+      width: 15px; height: 15px;
+      transition: transform var(--t-state) var(--ease-out-quart);
+    }
+    .file-row[open] .file-chevron svg { transform: rotate(90deg); }
+    .file-icon svg { width: 18px; height: 18px; }
+    .file-name {
+      flex: 1 1 auto; min-width: 0; font-size: var(--fs-sm); color: var(--text);
+      word-break: break-all;
+    }
+    .file-row[open] .file-name { font-weight: 600; }
+    .file-meta { flex: none; font-size: var(--fs-cap); color: var(--text-muted); }
+    .file-preview { padding: 0 var(--s-4) var(--s-4); }
+
+    .reference-card .card-head { align-items: baseline; flex-wrap: wrap; }
+    .reference-image {
+      display: block; width: 100%; height: auto; margin-top: var(--s-2);
+      border: 1px solid var(--border-hairline); border-radius: var(--r-md);
+      background: #fff;
+    }
+    .reference-pdf {
+      width: 100%; height: 78vh; min-height: 420px; margin-top: var(--s-2);
+      border: 1px solid var(--border-hairline); border-radius: var(--r-md); background: #fff;
+    }
+    .reference-text {
+      margin-top: var(--s-2); max-height: 30rem; overflow: auto;
+      white-space: pre-wrap; word-break: break-word;
+      background: var(--surface-2); border: 1px solid var(--border-hairline);
+      border-radius: var(--r-md); padding: var(--s-3);
+      /* Body font, not monospace: these are notes to read, not code. */
+      font-family: inherit; font-size: var(--fs-sm); line-height: 1.6;
+    }
+
+    /* =========================================================================
+       REPLIES SENT FROM THE DASHBOARD
+       ========================================================================= */
+    .reply-log {
+      margin-top: var(--s-5); border-top: 1px solid var(--border-hairline);
+      padding-top: var(--s-4);
+    }
+    .reply-log-head {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--clear-bg); color: var(--clear-fg); border: 1px solid var(--clear-border);
+      padding: var(--s-2) var(--s-3); border-radius: var(--r-sm);
+      font-weight: 600; font-size: var(--fs-sm);
+      margin-bottom: var(--s-2);
+    }
+    .reply-log-count {
+      font-size: var(--fs-cap); background: var(--clear-border); color: var(--clear-fg);
+      padding: 2px var(--s-2); border-radius: var(--r-pill); font-variant-numeric: tabular-nums;
+    }
+    .reply-log-entry {
+      border: 1px solid var(--border-hairline); border-radius: var(--r-sm);
+      padding: var(--s-3); background: var(--surface); margin-bottom: var(--s-2);
+    }
+    .reply-log-entry:last-child { margin-bottom: 0; }
+    .reply-log-meta {
+      font-size: var(--fs-cap); color: var(--text-muted);
+      border-bottom: 1px solid var(--border-hairline);
+      padding-bottom: var(--s-2); margin-bottom: var(--s-2);
+    }
+    .reply-log-tag {
+      font-size: var(--fs-cap); font-weight: 500; text-transform: none; letter-spacing: 0;
+      background: var(--surface-2); color: var(--text-muted);
+      border: 1px solid var(--border-hairline); border-radius: var(--r-xs);
+      padding: 1px var(--s-2); margin-left: var(--s-1);
+    }
+    .reply-log-body {
+      white-space: pre-wrap; word-break: break-word; font-size: var(--fs-sm);
+      color: var(--text); line-height: 1.5;
+    }
+
+    /* =========================================================================
+       INPUT QUEUE
+       ========================================================================= */
+    .btn-lg {
+      height: 40px; line-height: 40px; padding: 0 var(--s-5); font-size: var(--fs-body);
+    }
+    .queue-contact { color: var(--text); font-weight: 400; }
+    .queue-card-body {
+      margin-top: var(--s-3); display: flex; justify-content: space-between;
+      align-items: flex-start; flex-wrap: wrap; gap: var(--s-3);
+    }
+    .queue-details { margin: 0; flex: 1; min-width: 240px; }
+    .queue-details > summary {
+      display: inline-flex; align-items: center; gap: var(--s-2);
+      cursor: pointer; user-select: none; list-style: none;
+      color: var(--accent); font-weight: 500; font-size: var(--fs-sm);
+      padding: var(--s-1) 0;
+      transition: color var(--t-micro) var(--ease-out);
+    }
+    .queue-details > summary::-webkit-details-marker { display: none; }
+    /* A caret the operator can read as state, rather than the browser's
+       default triangle which sits at a different baseline in every engine. */
+    .queue-details > summary::before {
+      content: '›'; display: inline-block; font-size: 1.1em; line-height: 1;
+      transition: transform var(--t-state) var(--ease-out-quart);
+    }
+    .queue-details[open] > summary::before { transform: rotate(90deg); }
+    .queue-details > summary:hover { color: var(--accent-hover); }
+    .queue-details-body {
+      margin-top: var(--s-3); padding-top: var(--s-3);
+      border-top: 1px solid var(--border-hairline);
+    }
+    .queue-details-foot {
+      margin-top: var(--s-4); padding-top: var(--s-3);
+      border-top: 1px solid var(--border-hairline);
+      display: flex; justify-content: flex-end;
+    }
+    .queue-actions { margin-top: 0; }
+    .queue-approved {
+      margin-top: var(--s-16); padding-top: var(--s-6);
+      border-top: 1px solid var(--border);
+    }
+    .card-ready { border-left-color: var(--clear-solid); }
+    /* Why a lead came back from a submission attempt. Uses the review (amber)
+       scale, not reject red: nothing is wrong with the lead, a field needs
+       filling in before it can go again. */
+    .submit-error-notice {
+      margin: 0 0 var(--s-4); padding: var(--s-3) var(--s-4);
+      background: var(--review-bg); color: var(--review-fg);
+      border: 1px solid var(--review-border);
+      border-left: 3px solid var(--review-solid);
+      border-radius: var(--r-sm);
+      font-size: var(--fs-sm); line-height: var(--lh-sm);
+    }
+    .submit-error-notice strong { font-weight: 600; }
+    .ready-row {
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: var(--s-3);
+    }
+    .ready-name { font-weight: 600; font-size: var(--fs-body); color: var(--text); }
+    .ready-status { font-weight: 500; color: var(--clear-fg); }
+
+    /* =========================================================================
+       EMAIL THREAD
+       ========================================================================= */
+    /* These lived as inline styles with hardcoded indigo hexes (#eef2ff,
+       #3730a3, #c7d2fe), so the thread ignored both the brand palette and dark
+       mode -- light-indigo panels stayed light-indigo on a near-black page.
+       Same layout, expressed in tokens. */
+    .followup-thread-section {
+      margin-top: var(--s-5); border-top: 1px solid var(--border-hairline);
+      padding-top: var(--s-4);
+    }
+    .followup-banner {
+      display: flex; align-items: center; justify-content: space-between; gap: var(--s-3);
+      background: var(--info-bg); color: var(--info-fg); border: 1px solid var(--info-border);
+      padding: var(--s-2) var(--s-3); border-radius: var(--r-sm);
+      font-weight: 500; font-size: var(--fs-sm); margin-bottom: var(--s-2);
+    }
+    .followup-banner-count {
+      flex: none; font-size: var(--fs-cap); font-weight: 600;
+      background: var(--info-border); color: var(--info-fg);
+      padding: 2px var(--s-2); border-radius: var(--r-pill);
+      font-variant-numeric: tabular-nums;
+    }
+    .thread-dropdown {
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--r-md); overflow: hidden;
+    }
+    .thread-dropdown > summary {
+      padding: var(--s-3); font-weight: 500; font-size: var(--fs-sm);
+      cursor: pointer; user-select: none;
+      background: var(--surface); color: var(--text); list-style: none;
+      transition: background-color var(--t-micro) var(--ease-out);
+    }
+    .thread-dropdown > summary::-webkit-details-marker { display: none; }
+    .thread-dropdown > summary:hover { background: var(--tint-hover); }
+    .thread-body-container {
+      padding: var(--s-3); display: flex; flex-direction: column; gap: var(--s-4);
+    }
+    /* Every message used to be the same flat panel with a one-line eyebrow, so
+       a four-message thread read as one undifferentiated block. Three things
+       carry the structure now: a numbered rail down the left that fixes the
+       chronological order, a coloured edge saying which side wrote it, and a
+       banded top and bottom on each card so the start and end of a message are
+       drawn rather than inferred. */
+    .thread-list {
+      list-style: none; margin: 0; padding: 0;
+      display: flex; flex-direction: column; gap: var(--s-4);
+    }
+    .thread-message {
+      position: relative; display: grid; gap: var(--s-3);
+      grid-template-columns: 26px minmax(0, 1fr);
+    }
+    .thread-msg-rail {
+      width: 26px; height: 26px; border-radius: var(--r-pill);
+      display: grid; place-items: center;
+      background: var(--surface); border: 1px solid var(--border);
+      font-size: var(--fs-cap); font-weight: 600; color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    /* The connector only spans the gap to the next card, so the last message
+       does not trail a line into empty space. */
+    .thread-message:not(:last-child) > .thread-msg-rail::after {
+      content: ''; position: absolute; left: 12px; top: 30px;
+      bottom: calc(-1 * var(--s-4)); width: 2px; background: var(--border-hairline);
+    }
+    .thread-msg-card {
+      min-width: 0; overflow: hidden;
+      border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+      border-radius: var(--r-md); background: var(--surface);
+    }
+    .thread-message-external > .thread-msg-card { border-left-color: var(--navy); }
+    .thread-message-internal > .thread-msg-card {
+      border-left-color: var(--accent); background: var(--surface-2);
+    }
+    .thread-message-internal > .thread-msg-rail {
+      border-color: var(--accent); color: var(--accent);
+    }
+    .thread-message-quoted > .thread-msg-card {
+      border-style: dashed; border-left-style: solid; border-left-color: var(--text-faint);
+      background: var(--surface-2);
+    }
+    .thread-msg-topline {
+      display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2);
+      padding: var(--s-2) var(--s-3);
+      background: var(--tint-hover); border-bottom: 1px solid var(--border-hairline);
+    }
+    .thread-message-internal > .thread-msg-card > .thread-msg-topline {
+      background: var(--tint-accent);
+    }
+    /* An 11px eyebrow is the one place uppercase and positive tracking earn
+       their keep -- at that size the extra space is what keeps it readable. */
+    .thread-msg-seq {
+      font-size: var(--fs-label); line-height: var(--lh-label); font-weight: 600;
+      text-transform: uppercase; letter-spacing: var(--ls-label); color: var(--text-muted);
+    }
+    .thread-msg-tags { display: inline-flex; flex-wrap: wrap; gap: var(--s-1); }
+    .thread-tag {
+      font-size: var(--fs-label); line-height: 16px; font-weight: 600;
+      padding: 0 var(--s-2); border-radius: var(--r-pill);
+      border: 1px solid var(--border); color: var(--text-muted); background: var(--surface);
+    }
+    .thread-tag-external { color: var(--navy); border-color: var(--border-strong); }
+    .thread-tag-internal { color: var(--accent); border-color: var(--info-border); }
+    .thread-tag-quiet { color: var(--text-faint); }
+    .thread-msg-when {
+      margin-left: auto; font-size: var(--fs-cap); color: var(--text-muted);
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    .thread-msg-header {
+      border-bottom: 1px solid var(--border-hairline);
+      padding: var(--s-3) var(--s-3) var(--s-2);
+      font-size: var(--fs-sm); color: var(--text); overflow-wrap: anywhere;
+    }
+    .thread-msg-header strong { font-weight: 600; }
+    .thread-msg-card > .translation-notice { margin: var(--s-2) var(--s-3) 0; }
+    .thread-msg-body {
+      white-space: pre-wrap; font-family: inherit; font-size: var(--fs-sm);
+      color: var(--text); line-height: 1.55; padding: var(--s-3);
+      overflow-wrap: anywhere;
+    }
+    /* A closing rule under each message: with several stacked, "where does this
+       one stop" is the question the old layout left open. */
+    .thread-msg-foot {
+      padding: var(--s-2) var(--s-3);
+      border-top: 1px dashed var(--border);
+      font-size: var(--fs-label); line-height: var(--lh-label); font-weight: 600;
+      text-transform: uppercase; letter-spacing: var(--ls-label); color: var(--text-faint);
+    }
+
+    /* =========================================================================
+       DIALOGS
+       ========================================================================= */
     .forward-dialog {
-      width: min(440px, calc(100vw - 2rem)); padding: 0; color: var(--text);
-      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-      box-shadow: 0 14px 40px rgba(26,38,43,0.28);
+      width: min(460px, calc(100vw - 2rem)); padding: 0; color: var(--text);
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-xl);
+      box-shadow: var(--shadow-modal);
     }
-    .forward-dialog::backdrop { background: rgba(18,25,29,0.55); }
-    .forward-dialog form { padding: 1.2rem 1.3rem; }
-    .forward-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    /* Dialogs animate themselves in; there is no JS hook for the open state, so
+       the animation hangs off [open] and the backdrop fades with it. */
+    .forward-dialog[open] { animation: dialog-in var(--t-panel) var(--ease-out-quart) both; }
+    .forward-dialog::backdrop { background: rgba(18, 25, 29, 0.45); }
+    .forward-dialog[open]::backdrop { animation: fade-in var(--t-panel) var(--ease-out) both; }
+    .forward-dialog form { padding: var(--s-5) var(--s-6) var(--s-6); }
+    .forward-dialog-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: var(--s-4); margin-bottom: var(--s-4);
+    }
     .forward-dialog-head h3 { margin: 0; }
     .forward-dialog-close {
-      padding: 0; border: 0; background: transparent; color: var(--text-muted);
-      font-size: 1.6rem; line-height: 1;
+      width: 30px; height: 30px; padding: 0; flex: none;
+      border: 0; background: transparent; color: var(--text-muted);
+      font-size: 1.5rem; line-height: 1; border-radius: var(--r-sm);
     }
+    .forward-dialog-close:hover { background: var(--tint-hover); color: var(--text); filter: none; }
     .forward-dialog textarea { min-height: 7rem; }
-    .label-optional { text-transform: none; font-weight: 400; }
-    .forward-dialog-actions { justify-content: flex-end; margin-top: 1.2rem; }
-    .forward-notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); margin: 1rem 0; font-weight: 600; }
+    .label-optional { text-transform: none; font-weight: 400; color: var(--text-muted); }
+    .forward-dialog-actions { justify-content: flex-end; margin-top: var(--s-5); }
+
+    .forward-notice {
+      padding: var(--s-3) var(--s-4); border-radius: var(--r-md);
+      margin: var(--s-4) 0; font-weight: 500; font-size: var(--fs-sm);
+      animation: rise-in var(--t-state) var(--ease-out-quart) both;
+    }
     .forward-notice-success { background: var(--clear-bg); color: var(--clear-fg); border: 1px solid var(--clear-border); }
     .forward-notice-error { background: var(--reject-bg); color: var(--reject-fg); border: 1px solid var(--reject-border); }
     .translation-notice {
-      display: inline-block; margin: 0 0 0.55rem; padding: 0.25rem 0.55rem;
-      border: 1px solid #93c5fd; border-radius: var(--radius-sm);
-      background: #eff6ff; color: #1e40af; font-size: 0.76rem; font-weight: 700;
+      display: inline-flex; align-items: center; height: 20px;
+      margin: 0 0 var(--s-2); padding: 0 var(--s-2);
+      border: 1px solid var(--info-border); border-radius: var(--r-xs);
+      background: var(--info-bg); color: var(--info-fg);
+      font-size: var(--fs-cap); font-weight: 500;
+    }
+    /* A dialog renders in the browser's top layer, above any toast, so an
+       action that fails while its dialog is open has to report inside it --
+       which is also where the typed message the operator would lose is. */
+    .dialog-error {
+      margin: var(--s-4) 0 0; padding: var(--s-2) var(--s-3); border-radius: var(--r-sm);
+      background: var(--reject-bg); color: var(--reject-fg);
+      border: 1px solid var(--reject-border); font-size: var(--fs-sm); font-weight: 500;
+      animation: rise-in var(--t-state) var(--ease-out-quart) both;
     }
 
-    table.kv-table { width: auto; min-width: 60%; border-collapse: collapse; }
-    table.kv-table td { padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--border); font-size: 0.85rem; vertical-align: top; }
-    table.kv-table tr:last-child td { border-bottom: none; }
-    table.kv-table td:first-child { font-weight: 600; color: var(--text-muted); white-space: nowrap; width: 110px; }
-
-    table.lead-table { width: 100%; margin-top: 0.7rem; }
-    table.lead-table tr.row-risk-clear td:first-child { box-shadow: inset 3px 0 0 var(--clear-fg); }
-    table.lead-table tr.row-risk-review td:first-child { box-shadow: inset 3px 0 0 var(--review-fg); }
-    table.lead-table tr.row-risk-reject td:first-child { box-shadow: inset 3px 0 0 var(--reject-fg); }
-    table.lead-table td.details-cell { white-space: pre-line; line-height: 1.6; }
-
-    /* --- Submission notifications (bell) --- */
+    /* =========================================================================
+       SUBMISSION NOTIFICATIONS (bell)
+       ========================================================================= */
     .bell-wrap { position: relative; display: flex; align-items: center; }
     .bell-btn {
-      background: none; border: none; cursor: pointer; padding: 0.3rem; line-height: 0;
-      color: var(--text-muted); border-radius: var(--radius-sm); position: relative;
+      background: none; border: none; cursor: pointer;
+      width: 34px; height: 34px; padding: 0; line-height: 0;
+      color: #5f6b70; border-radius: var(--r-sm); position: relative;
     }
-    .bell-btn:hover { color: #28495a; background: var(--surface-2); }
-    .bell-btn svg { width: 22px; height: 22px; display: block; }
+    .bell-btn:hover { color: #28495a; background: rgba(26, 38, 43, 0.05); filter: none; }
+    .bell-btn svg { width: 20px; height: 20px; display: block; }
     .bell-badge {
-      position: absolute; top: -2px; right: -4px; min-width: 17px; height: 17px;
-      padding: 0 4px; box-sizing: border-box; border-radius: var(--radius-pill);
-      background: var(--reject-fg); color: #fff; font-size: 0.68rem; font-weight: 700;
-      line-height: 17px; text-align: center;
+      position: absolute; top: 1px; right: 1px; min-width: 16px; height: 16px;
+      padding: 0 4px; box-sizing: border-box; border-radius: var(--r-pill);
+      background: var(--reject-solid); color: #fff;
+      font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums;
+      line-height: 16px; text-align: center;
+      box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
     }
-    .bell-badge.is-warning { background: var(--review-fg); }
+    .bell-badge.is-warning { background: var(--review-solid); }
     .bell-panel {
-      position: absolute; top: calc(100% + 10px); right: 0; width: 380px; max-width: 90vw;
-      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-      box-shadow: 0 8px 24px rgba(26,38,43,0.16); z-index: 100; overflow: hidden;
+      position: absolute; top: calc(100% + var(--s-3)); right: 0; width: 380px; max-width: 90vw;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+      box-shadow: var(--shadow-lg); z-index: 100; overflow: hidden;
+      animation: pop-in var(--t-state) var(--ease-out-quart) both;
     }
     .bell-panel[hidden] { display: none; }
     .bell-panel-head {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 0.7rem 0.9rem; background: var(--surface-2);
-      border-bottom: 1px solid var(--border);
+      padding: var(--s-3) var(--s-4); background: var(--surface-2);
+      box-shadow: inset 0 -1px 0 var(--border-hairline);
     }
-    .bell-panel h4 { margin: 0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+    .bell-panel h4 {
+      margin: 0; font-size: var(--fs-cap); font-weight: 600;
+      text-transform: none; letter-spacing: 0; color: var(--text);
+    }
     .bell-list { max-height: 60vh; overflow-y: auto; }
-    .bell-item { display: flex; gap: 0.6rem; padding: 0.75rem 0.9rem; border-bottom: 1px solid var(--border); }
+    .bell-item {
+      display: flex; gap: var(--s-3); padding: var(--s-3) var(--s-4);
+      border-bottom: 1px solid var(--border-hairline);
+    }
     .bell-item:last-child { border-bottom: none; }
-    .bell-item .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 0.4rem; flex: none; }
-    .bell-item.sev-blocked .dot { background: var(--reject-fg); }
-    .bell-item.sev-warning .dot { background: var(--review-fg); }
+    .bell-item .dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 7px; flex: none; }
+    .bell-item.sev-blocked .dot { background: var(--reject-solid); }
+    .bell-item.sev-warning .dot { background: var(--review-solid); }
     .bell-item .body { flex: 1; min-width: 0; }
-    .bell-item .headline { font-weight: 700; font-size: 0.83rem; color: var(--text); }
+    .bell-item .headline { font-weight: 600; font-size: var(--fs-sm); color: var(--text); }
     .bell-item.sev-blocked .headline { color: var(--reject-fg); }
-    .bell-item .who { font-size: 0.85rem; margin: 0.1rem 0; }
-    .bell-item .who a { color: var(--accent); text-decoration: none; font-weight: 600; }
+    .bell-item .who { font-size: var(--fs-sm); margin: 2px 0; }
+    .bell-item .who a { color: var(--accent); text-decoration: none; font-weight: 500; }
     .bell-item .who a:hover { text-decoration: underline; }
-    .bell-item .detail { font-size: 0.78rem; color: var(--text-muted); line-height: 1.45; word-wrap: break-word; }
+    .bell-item .detail {
+      font-size: var(--fs-cap); color: var(--text-muted); line-height: 1.45; word-wrap: break-word;
+    }
     .bell-dismiss {
       background: none; border: none; cursor: pointer; color: var(--text-faint);
-      font-size: 1.1rem; line-height: 1; padding: 0 0.2rem; flex: none;
+      width: 22px; height: 22px; font-size: 1rem; line-height: 1; padding: 0; flex: none;
+      border-radius: var(--r-xs);
     }
-    .bell-dismiss:hover { color: var(--text); }
-    .bell-empty { padding: 1.4rem 0.9rem; text-align: center; color: var(--text-muted); font-size: 0.85rem; }
-    .bell-clear { background: none; border: none; cursor: pointer; color: var(--accent); font-size: 0.78rem; font-weight: 600; padding: 0; }
-    .bell-clear:hover { text-decoration: underline; }
+    .bell-dismiss:hover { color: var(--text); background: var(--tint-hover); filter: none; }
+    .bell-empty {
+      padding: var(--s-8) var(--s-4); text-align: center;
+      color: var(--text-muted); font-size: var(--fs-sm);
+    }
+    .bell-clear {
+      background: none; border: none; cursor: pointer; color: var(--accent);
+      height: auto; line-height: 1.4; font-size: var(--fs-cap); font-weight: 500; padding: 0;
+    }
+    .bell-clear:hover { text-decoration: underline; filter: none; }
+
+    /* =========================================================================
+       TOASTS
+       ========================================================================= */
+    /* For actions that finish where they started: the review page no longer
+       navigates to a confirmation, so the bar across the top is the whole
+       report of what happened. `top` is set from the header's real position
+       when a toast is shown -- see showToast(). */
+    .toast-stack {
+      position: fixed; top: var(--s-4); left: 50%; transform: translateX(-50%);
+      z-index: 60; display: flex; flex-direction: column; gap: var(--s-2);
+      width: min(640px, calc(100vw - 2rem)); pointer-events: none;
+    }
+    .toast {
+      padding: var(--s-3) var(--s-5); border-radius: var(--r-lg);
+      background: var(--success); color: #fff;
+      font-size: var(--fs-sm); font-weight: 500; text-align: center;
+      box-shadow: var(--shadow-lg);
+      opacity: 0; transform: translate3d(0, -12px, 0) scale(0.98);
+      transition: opacity var(--t-state) var(--ease-out-quart),
+                  transform var(--t-state) var(--ease-out-quart);
+      will-change: transform, opacity;
+    }
+    .toast-visible { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+    .toast-error { background: var(--danger); }
+
+    /* =========================================================================
+       MOTION KEYFRAMES
+       ========================================================================= */
+    /* translate3d + opacity only: both are composited, so neither triggers
+       layout or paint on any frame. Anything animating width/height/top on a
+       list this long would visibly drop frames. */
+    @keyframes rise-in {
+      from { opacity: 0; transform: translate3d(0, 8px, 0); }
+      to   { opacity: 1; transform: translate3d(0, 0, 0); }
+    }
+    @keyframes pop-in {
+      from { opacity: 0; transform: translate3d(0, -6px, 0) scale(0.98); }
+      to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+    }
+    @keyframes dialog-in {
+      from { opacity: 0; transform: translate3d(0, 12px, 0) scale(0.97); }
+      to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+    }
+    @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+    /* Cards enter staggered, capped at index 12 so a 200-lead queue does not
+       spend eight seconds dealing itself out. Jinja sets --i on each card.
+       Opt-in via .card-enter rather than on .card itself: fill-mode `both`
+       leaves a translate3d permanently applied, and a transformed ancestor
+       becomes the containing block for any position:sticky inside it -- which
+       silently re-anchored the history table's header to the card. */
+    .card-enter {
+      animation: rise-in 380ms var(--ease-out-quart) both;
+      animation-delay: calc(var(--i, 0) * 35ms);
+    }
+    /* Movement is the part that causes trouble for vestibular disorders, not
+       the fade -- so reduced motion keeps the fade and drops the travel. */
+    @media (prefers-reduced-motion: reduce) {
+      @keyframes rise-in { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes pop-in { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes dialog-in { from { opacity: 0; } to { opacity: 1; } }
+      .card-enter { animation-delay: 0ms !important; }
+    }
+
+    /* =========================================================================
+       RESPONSIVE
+       ========================================================================= */
+    /* Narrow window: three labelled buttons no longer fit on one line, and a
+       wrapped absolute row would climb over the Approve/Reject buttons above
+       it. Drop them into the normal flow instead. */
+    @media (max-width: 780px) {
+      header { padding: 0 var(--s-4); gap: var(--s-3); flex-wrap: wrap; }
+      header .brand img { height: 56px; }
+      main { padding: var(--s-6) var(--s-4) var(--s-12); }
+      .email-actions {
+        position: static; justify-content: flex-start; margin-top: var(--s-4);
+      }
+      /* Too narrow for two groups side by side: let the wrapped row start at
+         the left edge like everything else rather than hug the right. */
+      .lead-forward-card .email-actions { margin-left: 0; }
+      .lead-detail-card { padding-bottom: var(--s-5); }
+      .history-wrap { overflow: visible; padding: 0; background: transparent; border: 0; box-shadow: none; }
+      .history-table { min-width: 0; display: block; }
+      .history-table colgroup, .history-table thead { display: none; }
+      .history-table tbody { display: grid; gap: var(--s-3); }
+      .history-table tr {
+        display: block; background: var(--surface); border: 1px solid var(--border);
+        border-radius: var(--r-lg); padding: var(--s-3);
+      }
+      .history-table td {
+        display: grid; grid-template-columns: 96px minmax(0, 1fr);
+        gap: var(--s-3); padding: var(--s-2) 0; border-bottom: none;
+      }
+      .history-table td::before {
+        content: attr(data-label); color: var(--text-muted);
+        font-size: var(--fs-cap); font-weight: 500;
+      }
+      .history-actions { align-items: flex-start; }
+      .edit-grid { grid-template-columns: 1fr; }
+      .edit-field-wide { grid-column: auto; }
+    }
+    @media (max-width: 620px) { .file-meta { display: none; } }
   </style>
 </head>
 <body>
   <div class="top-strip"></div>
+  <div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
   <header>
     <a class="brand" href="{{ url_for('index') }}">
       <img src="{{ url_for('static', filename='logo.svg') }}" alt="Bal Seal Engineering">
     </a>
     <nav>
-      <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">Pending Review{% if pending_count %} ({{ pending_count }}){% endif %}</a>
-      <a href="{{ url_for('queue') }}" class="{{ 'active' if request.endpoint == 'queue' }}">Input Queue{% if staged_count or ready_count %} <span style="background:var(--accent); color:#fff; border-radius:10px; padding:2px 7px; font-size:0.75rem; margin-left:2px;">{{ staged_count + ready_count }}</span>{% endif %}</a>
+      {# pending-link so removeLeadCards() can keep this count honest when cards
+         are cleared without a page load. #}
+      <a href="{{ url_for('index') }}" class="pending-link {{ 'active' if request.endpoint == 'index' }}">Pending Review{% if pending_count %} ({{ pending_count }}){% endif %}</a>
+      <a href="{{ url_for('queue') }}" class="{{ 'active' if request.endpoint == 'queue' }}">Input Queue{% if staged_count or ready_count %} <span class="nav-count">{{ staged_count + ready_count }}</span>{% endif %}</a>
       <a href="{{ url_for('history') }}" class="{{ 'active' if request.endpoint == 'history' }}">History</a>
+      <a href="{{ url_for('reference') }}" class="{{ 'active' if request.endpoint in ('reference', 'reference_file') }}">Reference</a>
       <a href="{{ url_for('status') }}" class="{{ 'active' if request.endpoint == 'status' }}">Status</a>
 
       <div class="bell-wrap">
@@ -345,6 +1379,16 @@
   <main>
     {% block content %}{% endblock %}
   </main>
+
+  {# The HQ lookup can be started from any page that shows a lead card, so its
+     result is reported here once instead of in each of those templates. #}
+  {% for message in get_flashed_messages(category_filter=['hq_success']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}); });</script>
+  {% endfor %}
+  {% for message in get_flashed_messages(category_filter=['hq_error']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}, 'error'); });</script>
+  {% endfor %}
+
   <script>
     function scrollToLead(element) {
       if (!element) return;
@@ -355,6 +1399,176 @@
         top: Math.max(0, elementTop - headerHeight),
         behavior: 'smooth'
       });
+    }
+
+    // Say what just happened without moving the operator off the page. Green
+    // unless `kind` is 'error'; gone on its own after a few seconds, because
+    // nothing here is worth dismissing by hand.
+    function showToast(text, kind) {
+      var stack = document.getElementById('toast-stack');
+      if (!stack || !text) return;
+      // Below the header while it is on screen, near the top of the window once
+      // it has been scrolled past. The header is in normal flow, so its own
+      // bottom edge answers both cases without hard-coding its height.
+      var header = document.querySelector('header');
+      var below = header ? header.getBoundingClientRect().bottom + 14 : 16;
+      stack.style.top = Math.max(16, below) + 'px';
+      var toast = document.createElement('div');
+      toast.className = 'toast' + (kind === 'error' ? ' toast-error' : '');
+      toast.textContent = text;
+      stack.appendChild(toast);
+      // Next frame, so the browser lays the toast out at opacity 0 first and
+      // the class change is something it can actually transition.
+      requestAnimationFrame(function() { toast.classList.add('toast-visible'); });
+      setTimeout(function() {
+        toast.classList.remove('toast-visible');
+        setTimeout(function() { toast.remove(); }, 250);
+      }, kind === 'error' ? 6000 : 3200);
+    }
+
+    // Every email action on a review card -- delete, forward, reply -- goes
+    // through here: post the dialog's form, stay on the page, and report the
+    // outcome. The lead pages post the same forms normally and get a redirect,
+    // so this is an enhancement on top of something that already works.
+    //
+    // A success closes the dialog, toasts, and clears whichever cards the
+    // server says have left the queue (none, for a reply). A failure keeps the
+    // dialog open with the message inside it, so nothing typed is lost and the
+    // operator can correct it and send again.
+    function submitEmailAction(form, dialog) {
+      var submitButton = form.querySelector('button[type=submit]');
+      var errorBox = dialog ? dialog.querySelector('.dialog-error') : null;
+      if (errorBox) errorBox.hidden = true;
+      if (submitButton) submitButton.disabled = true;
+
+      fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content
+        }
+      }).then(function(res) {
+        if (!res.ok) throw new Error('action failed: ' + res.status);
+        return res.json();
+      }).then(function(data) {
+        if (submitButton) submitButton.disabled = false;
+        if (!data.ok) {
+          if (errorBox) {
+            errorBox.textContent = data.error;
+            errorBox.hidden = false;
+          } else {
+            showToast(data.error, 'error');
+          }
+          return;
+        }
+        if (dialog) dialog.close();
+        showToast(data.message);
+        removeLeadCards((data.dropped || []).map(function(id) {
+          return document.getElementById('lead-card-' + id);
+        }));
+      }).catch(function() {
+        // Something below the app went wrong -- post the form the ordinary way
+        // so the operator ends up on a page that explains itself.
+        if (submitButton) submitButton.disabled = false;
+        form.submit();
+      });
+    }
+
+    // Fade decided cards out, then bring the heading, the nav count and the
+    // empty state back in line with what is left. Shared by the Approve/Reject
+    // buttons and the delete dialog -- one email can produce several leads, so
+    // deleting it clears every card that came from it.
+    function refreshQueueSummary() {
+      var reviewCards = document.querySelectorAll('[id^="queue-card-"]');
+      var remaining = reviewCards.length;
+      var heading = document.querySelector('h2');
+      if (heading && heading.textContent.indexOf('Input Queue') !== -1) {
+        heading.textContent = 'Input Queue — Session Review (' + remaining + ')';
+      }
+
+      var queueForm = document.querySelector('form[action$="/queue/approve_all"]');
+      if (queueForm) {
+        var confirmBtn = queueForm.querySelector('button');
+        if (confirmBtn) {
+          if (remaining === 0) {
+            queueForm.remove();
+          } else {
+            var reviewedLabel = remaining === 1 ? 'lead' : 'leads';
+            confirmBtn.textContent = 'Confirm & Send ' + remaining + ' to Oracle';
+            confirmBtn.setAttribute(
+              'onclick',
+              "return confirm('Send " + remaining + " reviewed " + reviewedLabel + " to Oracle?');"
+            );
+          }
+        }
+      }
+
+      var queueNav = document.querySelector('nav a[href="/queue"]');
+      if (queueNav) {
+        var badge = queueNav.querySelector('span');
+        var total = document.querySelectorAll('.card').length;
+        if (total > 0) {
+          if (!badge) {
+            badge = document.createElement('span');
+            badge.style.background = 'var(--accent)';
+            badge.style.color = '#fff';
+            badge.style.borderRadius = '10px';
+            badge.style.padding = '2px 7px';
+            badge.style.fontSize = '0.75rem';
+            badge.style.marginLeft = '2px';
+            queueNav.appendChild(badge);
+          }
+          badge.textContent = total;
+        } else if (badge) {
+          badge.remove();
+        }
+      }
+    }
+
+    function removeLeadCards(cards, nextCard) {
+      cards = cards.filter(Boolean);
+      if (!cards.length) return;
+      cards.forEach(function(card) {
+        card.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+        card.style.opacity = '0';
+        card.style.transform = 'scale(0.98)';
+      });
+      setTimeout(function() {
+        cards.forEach(function(card) { card.remove(); });
+        if (nextCard && document.body.contains(nextCard)) {
+          scrollToLead(nextCard);
+        }
+
+        var remaining = document.querySelectorAll('.card').length;
+        var heading = document.querySelector('h2');
+        if (heading && heading.textContent.indexOf('Pending Review') !== -1) {
+          heading.textContent = 'Pending Review (' + remaining + ')';
+        }
+        var navLink = document.querySelector('nav a.pending-link');
+        if (navLink) {
+          navLink.textContent = remaining
+            ? 'Pending Review (' + remaining + ')'
+            : 'Pending Review';
+        }
+
+        if (heading && heading.textContent.indexOf('Input Queue') !== -1) {
+          refreshQueueSummary();
+        }
+
+        if (remaining === 0) {
+          var main = document.querySelector('main');
+          if (main && !document.querySelector('.empty-container')) {
+            var emptyDiv = document.createElement('div');
+            emptyDiv.className = 'empty-container';
+            // Markup matches index.html's server-rendered empty state exactly, so
+            // a queue that drains in place looks identical to one loaded empty.
+            emptyDiv.innerHTML = '<h3>No leads waiting for review</h3>' +
+              '<a href="/queue" class="btn btn-approve">Review All Leads &rarr;</a>';
+            main.appendChild(emptyDiv);
+          }
+        }
+      }, 200);
     }
 
     document.addEventListener('DOMContentLoaded', function() {
@@ -378,6 +1592,14 @@
         });
       }
 
+      // A dialog closed with an error still showing must not reopen wearing it.
+      document.querySelectorAll('dialog').forEach(function(dialog) {
+        dialog.addEventListener('close', function() {
+          var errorBox = dialog.querySelector('.dialog-error');
+          if (errorBox) errorBox.hidden = true;
+        });
+      });
+
       var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
       document.querySelectorAll('form[method="post"], form[method="POST"]').forEach(function(form) {
         if (!form.querySelector('input[name="_csrf_token"]')) {
@@ -388,6 +1610,19 @@
           form.appendChild(input);
         }
       });
+      // The HQ lookup reads several web pages and calls the model before it
+      // can answer, so the page can sit there for most of a minute. Say that
+      // on the button rather than leaving a click that looks ignored.
+      document.querySelectorAll('form.hq-lookup-form').forEach(function(form) {
+        form.addEventListener('submit', function() {
+          var button = form.querySelector('button');
+          if (button) {
+            button.disabled = true;
+            button.textContent = 'Looking up…';
+          }
+        });
+      });
+
       if (sessionStorage.getItem('scroll_to_next_lead')) {
         sessionStorage.removeItem('scroll_to_next_lead');
         var firstCard = document.querySelector('.card');
@@ -426,34 +1661,8 @@
             }
           }).then(function(res) {
             if (res.ok) {
-              card.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
-              card.style.opacity = '0';
-              card.style.transform = 'scale(0.98)';
-              setTimeout(function() {
-                card.remove();
-
-                // Smoothly scroll to the top of the NEXT lead card
-                if (nextCard) {
-                  scrollToLead(nextCard);
-                }
-
-                var heading = document.querySelector('h2');
-                var remainingCards = document.querySelectorAll('.card');
-                if (heading && heading.textContent.includes('Pending Review')) {
-                  heading.textContent = 'Pending Review (' + remainingCards.length + ')';
-                }
-                if (remainingCards.length === 0) {
-                  var main = document.querySelector('main');
-                  if (main && !document.querySelector('.empty-container')) {
-                    var emptyDiv = document.createElement('div');
-                    emptyDiv.className = 'empty-container';
-                    emptyDiv.style.cssText = 'text-align: center; margin: 4rem auto; max-width: 500px; padding: 2.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;';
-                    emptyDiv.innerHTML = '<h3 style="margin-top: 0; margin-bottom: 1.5rem; font-size: 1.25rem;">No leads waiting for review</h3>' +
-                      '<a href="/queue" class="btn-approve" style="display: inline-flex; align-items: center; gap: 0.5rem; text-decoration: none; font-size: 1.05rem; padding: 0.75rem 1.6rem; border-radius: 8px;">Review All Leads &rarr;</a>';
-                    main.appendChild(emptyDiv);
-                  }
-                }
-              }, 200);
+              // Scrolls to the next card once this one is gone.
+              removeLeadCards([card], nextCard);
             } else {
               form.submit();
             }
@@ -463,6 +1672,161 @@
         }
       }
     });
+  </script>
+
+  {# Addresses the dashboard has already seen, for completing a forward or a
+     reply. Served as JSON rather than a <datalist> because these fields take
+     several comma-separated addresses: a datalist matches the whole field, so
+     it stops helping after the first one. #}
+  <script type="application/json" id="known-addresses">{{ known_addresses|tojson }}</script>
+  <script>
+    (function() {
+      var source = document.getElementById('known-addresses');
+      if (!source) return;
+      var people = [];
+      try { people = JSON.parse(source.textContent) || []; } catch (e) { return; }
+      if (!people.length) return;
+
+      // The address being typed is whatever follows the last separator.
+      var currentToken = function(value, caret) {
+        // selectionStart is null for input[type=email] in several browsers.
+        // Falling back to the end also keeps this safe if another address
+        // field changes type later.
+        if (!Number.isInteger(caret)) caret = value.length;
+        var upto = value.slice(0, caret);
+        var start = Math.max(upto.lastIndexOf(','), upto.lastIndexOf(';')) + 1;
+        return {start: start, text: upto.slice(start).trim()};
+      };
+
+      var attach = function(input) {
+        if (input.dataset.autocompleteAttached) return;
+        input.dataset.autocompleteAttached = '1';
+
+        var wrapper = document.createElement('div');
+        wrapper.className = 'address-autocomplete-wrapper';
+        input.parentNode.insertBefore(wrapper, input);
+        wrapper.appendChild(input);
+
+        var box = document.createElement('div');
+        box.className = 'address-suggestions';
+        box.hidden = true;
+        wrapper.appendChild(box);
+        var matches = [];
+        var active = -1;
+
+        var close = function() { box.hidden = true; active = -1; };
+
+        var apply = function(address) {
+          var caret = Number.isInteger(input.selectionStart)
+            ? input.selectionStart : input.value.length;
+          var token = currentToken(input.value, caret);
+          var after = input.value.slice(caret);
+          var head = input.value.slice(0, token.start);
+          input.value = head + (head && !/[,;]\s*$/.test(head) ? ' ' : '') +
+            address + after.trim();
+          input.focus();
+          var nextCaret = input.value.length - after.trim().length;
+          try { input.setSelectionRange(nextCaret, nextCaret); } catch (e) {}
+          close();
+        };
+
+        var render = function() {
+          box.textContent = '';
+          matches.forEach(function(person, i) {
+            var option = document.createElement('button');
+            option.type = 'button';
+            option.className = 'address-suggestion' + (i === active ? ' is-active' : '');
+            if (person.name) {
+              var name = document.createElement('span');
+              name.className = 'address-suggestion-address';
+              name.textContent = person.name;
+              option.appendChild(name);
+            }
+            var who = document.createElement('span');
+            who.className = person.name
+              ? 'address-suggestion-name' : 'address-suggestion-address';
+            who.textContent = person.address;
+            option.appendChild(who);
+            option.addEventListener('mousedown', function(event) {
+              event.preventDefault();      // keep focus; blur would close first
+              apply(person.address);
+            });
+            box.appendChild(option);
+          });
+          box.hidden = !matches.length;
+        };
+
+        input.addEventListener('input', function() {
+          var token = currentToken(input.value, input.selectionStart);
+          var needle = token.text.toLowerCase();
+          if (needle.length < 1) { close(); return; }
+          var already = input.value.toLowerCase();
+          matches = people.map(function(person, index) {
+            var address = person.address.toLowerCase();
+            var name = (person.name || '').toLowerCase();
+            if (address === needle) return null;
+            // Do not offer somebody already on this line.
+            if (already.indexOf(address) !== -1 && address.indexOf(needle) !== 0) return null;
+            // A person searched by name must beat an unrelated address that
+            // merely happens to contain the same letters ("Bill" should put
+            // Bill Rost ahead of asabillion@...). Preserve database recency
+            // within each relevance level.
+            var score = name.indexOf(needle) === 0 ? 0
+              : name.indexOf(needle) !== -1 ? 1
+              : address.indexOf(needle) === 0 ? 2
+              : address.indexOf(needle) !== -1 ? 3 : 99;
+            return score === 99 ? null : {person: person, score: score, index: index};
+          }).filter(Boolean).sort(function(a, b) {
+            return a.score - b.score || a.index - b.index;
+          }).slice(0, 8).map(function(match) { return match.person; });
+
+          // A full Bal Seal name can be completed even before that person has
+          // appeared in the database: first initial + all surname words.
+          // "Ethan John" -> ejohn@balseal.com; "Sandra van der Maat" ->
+          // svandermaat@balseal.com. The operator still clicks the proposed
+          // result before anything is placed on the To/Cc line.
+          if (token.text.indexOf('@') === -1) {
+            var nameParts = token.text.trim().split(/\s+/).map(function(part) {
+              return part.toLowerCase().replace(/[^a-z0-9]/g, '');
+            }).filter(Boolean);
+            if (nameParts.length >= 2) {
+              var inferred = nameParts[0][0] + nameParts.slice(1).join('') + '@balseal.com';
+              if (!matches.some(function(person) {
+                return person.address.toLowerCase() === inferred;
+              })) {
+                matches.unshift({
+                  address: inferred,
+                  name: token.text.trim()
+                });
+                matches = matches.slice(0, 8);
+              }
+            }
+          }
+          active = -1;
+          render();
+        });
+
+        input.addEventListener('keydown', function(event) {
+          if (box.hidden || !matches.length) return;
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            active += (event.key === 'ArrowDown' ? 1 : -1);
+            if (active < 0) active = matches.length - 1;
+            if (active >= matches.length) active = 0;
+            render();
+          } else if (event.key === 'Enter' && active >= 0) {
+            event.preventDefault();       // completing, not submitting
+            apply(matches[active].address);
+          } else if (event.key === 'Escape') {
+            close();
+          }
+        });
+
+        input.addEventListener('blur', function() { window.setTimeout(close, 120); });
+      };
+
+      document.querySelectorAll('[data-address-autocomplete]').forEach(attach);
+    })();
   </script>
 </body>
 </html>

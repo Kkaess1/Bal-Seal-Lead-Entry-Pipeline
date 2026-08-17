@@ -1,0 +1,94 @@
+{# The whole email exchange behind a lead: the messages actually ingested, plus
+   the earlier ones kept as context (see db.thread_messages). Included from
+   both _lead_table.html and the lead page's edit form -- a reviewer deciding
+   whether to forward a "RE: ..." needs the thread most while the lead is still
+   pending, which is exactly when the table is replaced by the form.
+
+   Read strictly oldest-first, one card per message, and each card holds only
+   what that sender newly wrote. It used to show every message with the whole
+   chain quoted underneath it and then repeat the quoted chain again at the
+   bottom, so the same email appeared several times with nothing marking where
+   one ended and the next began. The quoted copy now renders only when it is
+   the only copy there is -- see _decorate()'s show_quoted_history. #}
+{% set ingested_count = lead.email_thread|length if lead.email_thread else 0 %}
+{% if ingested_count > 1 or lead.show_quoted_history %}
+<div class="followup-thread-section">
+  <div class="followup-banner">
+    <span>📩 Email thread for <strong>{{ lead.display_name }}</strong>{% if lead.organization %} ({{ lead.organization }}){% endif %}</span>
+    <span class="followup-banner-count">
+      {{ ingested_count }} Message{{ '' if ingested_count == 1 else 's' }}{% if lead.show_quoted_history %} + quoted{% endif %}
+    </span>
+  </div>
+
+  <details class="thread-dropdown">
+    <summary>View conversation{% if ingested_count > 1 %} &mdash; {{ ingested_count }} messages, oldest first{% endif %}</summary>
+    <div class="thread-body-container">
+      <ol class="thread-list">
+      {% for msg in lead.email_thread %}
+        <li class="thread-message {{ 'thread-message-internal' if msg.is_internal else 'thread-message-external' }}">
+          <div class="thread-msg-rail" aria-hidden="true">{{ loop.index }}</div>
+          <div class="thread-msg-card">
+            <div class="thread-msg-topline">
+              <span class="thread-msg-seq">Message {{ loop.index }} of {{ ingested_count }}</span>
+              <span class="thread-msg-tags">
+                <span class="thread-tag {{ 'thread-tag-internal' if msg.is_internal else 'thread-tag-external' }}">
+                  {{ 'Bal Seal' if msg.is_internal else 'Customer' }}
+                </span>
+                {% if loop.first %}<span class="thread-tag thread-tag-quiet">Oldest</span>{% endif %}
+                {% if msg.is_context %}<span class="thread-tag thread-tag-quiet">Context</span>{% endif %}
+                {% if not msg.is_context and msg.id == lead.message_id %}<span class="thread-tag thread-tag-quiet">This lead</span>{% endif %}
+              </span>
+              {% if msg.received_at_display %}
+                <span class="thread-msg-when">{{ msg.received_at_display }}</span>
+              {% endif %}
+            </div>
+            <div class="thread-msg-header">
+              <div class="thread-msg-from">
+                <span><strong>From:</strong> {{ msg.sender }}</span>
+                {% if lead.status in editable_statuses and msg.sender_email %}
+                  {# Replies to this message alone: whoever wrote it, nobody else. #}
+                  <button type="button" class="btn btn-secondary reply-to-message"
+                          data-received-at="{{ msg.received_at }}"
+                          data-sender-email="{{ msg.sender_email }}"
+                          data-sender-label="this message from {{ msg.sender }}"
+                          title="Reply to {{ msg.sender_email }} only">Reply to this</button>
+                {% endif %}
+              </div>
+              <div><strong>To:</strong> {{ msg.recipient }}</div>
+              {% if msg.subject %}<div><strong>Subject:</strong> {{ msg.subject }}</div>{% endif %}
+            </div>
+            {% if msg.translated_from %}<div class="translation-notice">Translated from {{ msg.translated_from }} to English</div>{% endif %}
+            {# Empty either because no body was cached or because the message
+               was nothing but the quoted chain -- which is now shown as the
+               cards above rather than repeated in here. #}
+            <div class="thread-msg-body">{{ msg.body_text or '(no new text in this message)' }}</div>
+            <div class="thread-msg-foot">End of message {{ loop.index }}</div>
+          </div>
+        </li>
+      {% endfor %}
+      </ol>
+
+      {% if lead.show_quoted_history %}
+        {# The earlier messages usually never reached the Sales mailbox -- they
+           were exchanged from a rep's own account. This quoted copy, carried
+           inside the reply, is the only one there is. Shown only when the
+           thread has no separate cards for them, so it never repeats what is
+           already above. #}
+        <div class="thread-message thread-message-quoted">
+          <div class="thread-msg-rail" aria-hidden="true">↑</div>
+          <div class="thread-msg-card">
+            <div class="thread-msg-topline">
+              <span class="thread-msg-seq">Earlier in this thread</span>
+              <span class="thread-msg-tags">
+                <span class="thread-tag thread-tag-quiet">Quoted in the reply above</span>
+              </span>
+            </div>
+            <div class="thread-msg-body">{{ lead.quoted_history }}</div>
+            <div class="thread-msg-foot">End of quoted history</div>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </details>
+</div>
+{% endif %}

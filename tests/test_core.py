@@ -71,27 +71,28 @@ class DatabaseTests(unittest.TestCase):
         db.schedule_lead_retry(lead_id, 'operator authorized', delay_minutes=0, conn=self.conn)
         self.assertEqual(db.get_lead(lead_id, conn=self.conn)['status'], 'approved')
 
-    def test_same_batch_thread_is_one_lead_but_later_followup_is_new(self):
-        first_message = db.insert_message(
-            'thread-msg-1', received_at='2026-08-05T09:00:00+00:00',
-            conversation_id='conversation-1', ingest_batch_id='batch-1', conn=self.conn,
-        )
-        latest_message = db.insert_message(
-            'thread-msg-2', received_at='2026-08-05T09:05:00+00:00',
-            conversation_id='conversation-1', ingest_batch_id='batch-1', conn=self.conn,
-        )
-        first_lead = db.insert_lead(
-            {'email': 'person@example.com', 'first_name': 'Person'}, 'email_ai_extract',
-            message_id=first_message, status='pending_review', conn=self.conn,
-        )
-        latest_lead = db.insert_lead(
-            {'email': 'person@example.com', 'first_name': 'Person'}, 'email_ai_extract',
-            message_id=latest_message, status='pending_review', conn=self.conn,
-        )
+    def test_every_message_in_a_thread_keeps_its_own_lead(self):
+        """Replies used to be collapsed to the newest message per thread per
+        ingest run, deleting the older leads. Whether a reply needs answering
+        is the operator's decision, and a deleted lead never reaches them to
+        make it, so each non-green message now stands on its own."""
+        leads = []
+        for n, received_at in enumerate(
+            ('2026-08-05T09:00:00+00:00', '2026-08-05T09:05:00+00:00'), start=1
+        ):
+            message_id = db.insert_message(
+                f'thread-msg-{n}', received_at=received_at,
+                conversation_id='conversation-1', ingest_batch_id='batch-1', conn=self.conn,
+            )
+            leads.append(db.insert_lead(
+                {'email': 'person@example.com', 'first_name': 'Person'}, 'email_ai_extract',
+                message_id=message_id, status='pending_review', conn=self.conn,
+            ))
 
-        self.assertEqual(db.consolidate_ingest_batch_threads('batch-1', conn=self.conn), 1)
-        self.assertIsNone(db.get_lead(first_lead, conn=self.conn))
-        self.assertIsNotNone(db.get_lead(latest_lead, conn=self.conn))
+        # Both messages arrived in one run; both are waiting to be decided on.
+        self.assertEqual(len(db.list_leads(status='pending_review', conn=self.conn)), 2)
+        for lead_id in leads:
+            self.assertIsNotNone(db.get_lead(lead_id, conn=self.conn))
 
         later_message = db.insert_message(
             'thread-msg-3', received_at='2026-08-06T09:00:00+00:00',
@@ -101,9 +102,46 @@ class DatabaseTests(unittest.TestCase):
             {'email': 'person@example.com', 'first_name': 'Person'}, 'email_ai_extract',
             message_id=later_message, status='pending_review', conn=self.conn,
         )
-        self.assertEqual(db.consolidate_ingest_batch_threads('batch-2', conn=self.conn), 0)
-        self.assertEqual(len(db.list_leads(status='pending_review', conn=self.conn)), 2)
+        self.assertEqual(len(db.list_leads(status='pending_review', conn=self.conn)), 3)
+        # Each still reads against the whole exchange.
         self.assertEqual(len(db.get_lead_email_thread(later_lead, conn=self.conn)), 3)
+
+    def test_nothing_collapses_thread_leads_any_more(self):
+        self.assertFalse(hasattr(db, 'consolidate_ingest_batch_threads'))
+
+    def test_returning_a_lead_to_review_drops_the_old_review(self):
+        """A lead back in the pending queue has not been reviewed. The old
+        rejection note especially: the review card prefills its notes box from
+        review_notes, so leaving it would carry 'Original email deleted from
+        the Sales inbox' into the lead's next approval."""
+        lead_id = db.insert_lead(
+            {'email': 'a@example.com'}, 'test', status='pending_review', conn=self.conn
+        )
+        db.reject_lead(
+            lead_id, reviewed_by='dashboard',
+            review_notes='Original email deleted from the Sales inbox; not processed as a lead.',
+            conn=self.conn,
+        )
+        db.restore_lead_to_review(lead_id, conn=self.conn)
+
+        lead = db.get_lead(lead_id, conn=self.conn)
+        self.assertEqual(lead['status'], 'pending_review')
+        self.assertIsNone(lead['reviewed_by'])
+        self.assertIsNone(lead['reviewed_at'])
+        self.assertIsNone(lead['review_notes'])
+
+    def test_a_restored_failure_keeps_why_it_failed(self):
+        # submit_error is the reason to look at the lead at all, and a
+        # successful submission clears it.
+        lead_id = db.insert_lead(
+            {'email': 'a@example.com'}, 'test', status='approved', conn=self.conn
+        )
+        db.mark_lead_failed(lead_id, 'Oracle rejected the payload.', conn=self.conn)
+        db.restore_lead_to_review(lead_id, conn=self.conn)
+
+        lead = db.get_lead(lead_id, conn=self.conn)
+        self.assertEqual(lead['status'], 'pending_review')
+        self.assertEqual(lead['submit_error'], 'Oracle rejected the payload.')
 
 
 class ParserTests(unittest.TestCase):
@@ -145,6 +183,124 @@ class ParserTests(unittest.TestCase):
                 leads = excel_parser.parse_excel(path)
             self.assertEqual(len(leads), 1)
             self.assertEqual(leads[0]['organization'], 'Analytical Engines')
+
+
+class SecurityBannerTests(unittest.TestCase):
+    """
+    Proofpoint tags external mail by injecting a marked div pair at the top of
+    the HTML body. Flattened to text that exposed the markers, the banner
+    wording, and -- because the banner lands *below* the sender's display:none
+    preheader -- a run-on truncated copy of the message's own opening, which
+    read on the dashboard as the email arriving twice.
+
+    Fixture is the real shape of email_cache/dba95075e104ca6f6e6adafe.txt.
+    """
+
+    BANNERED = (
+        'CAUTION: This email originated from outside of the organization. Do not click '
+        'links or open attachments unless you recognize the sender and know the content '
+        'is safe.\n\n\n\n'
+        'Dear Sirs ( Sales Dept. ) Good afternoon We visited your website , it was '
+        'interesting for us . We have one workshop to repair MWD systems . Accordingly , '
+        'we need some parts (e. g : Pulser Bellows and Sleeve\n\n'
+        'ZjQcmQRYFpfptBannerStart\n\n'
+        'This Message Is From an External Sender \n\n'
+        'This message came from outside your organization. \n\n \n\n'
+        'ZjQcmQRYFpfptBannerEnd\n\n'
+        'Dear Sirs ( Sales Dept. )\n\n'
+        'Good afternoon\n\n'
+        'We visited your website , it was interesting for us .\n\n'
+        'We have one workshop to repair MWD systems .\n\n'
+        'Best Regards\n\nA.Rahavee\n'
+    )
+
+    def test_the_markers_never_reach_the_reader(self):
+        out = email_cleaner.clean_email_body(self.BANNERED)
+
+        self.assertNotIn('BannerStart', out)
+        self.assertNotIn('BannerEnd', out)
+        self.assertNotIn('ZjQcmQRYFpfpt', out)
+
+    def test_the_banner_wording_is_dropped(self):
+        out = email_cleaner.clean_email_body(self.BANNERED)
+
+        self.assertNotIn('External Sender', out)
+        self.assertNotIn('outside your organization', out)
+        self.assertNotIn('CAUTION', out)
+
+    def test_the_message_is_not_shown_twice(self):
+        out = email_cleaner.clean_email_body(self.BANNERED)
+
+        # The preheader repeated the opening line; exactly one copy should remain.
+        self.assertEqual(out.count('Good afternoon'), 1)
+        self.assertEqual(out.count('We visited your website'), 1)
+        # The run-on preheader phrasing is the copy that goes.
+        self.assertNotIn('Dear Sirs ( Sales Dept. ) Good afternoon', out)
+
+    def test_the_real_body_survives_intact(self):
+        out = email_cleaner.clean_email_body(self.BANNERED)
+
+        self.assertTrue(out.startswith('Dear Sirs ( Sales Dept. )'))
+        self.assertIn('MWD systems', out)
+        self.assertIn('A.Rahavee', out)
+
+    def test_a_different_banner_wording_still_goes(self):
+        # Seen in the cache too: same markers, "could not be verified" wording.
+        # Matching on the markers rather than the words is what covers this.
+        text = (
+            'Hello.\n\nZjQcmQRYFpfptBannerStart\n\nBe Careful With This Message \n\n'
+            "The sender's identity could not be verified.\n\n"
+            'ZjQcmQRYFpfptBannerEnd\n\nHello, I need a seal.\n'
+        )
+
+        out = email_cleaner.clean_email_body(text)
+
+        self.assertEqual(out, 'Hello, I need a seal.')
+
+    def test_a_lone_marker_does_not_leave_gibberish(self):
+        # Forwarded mail can arrive cut between the two markers.
+        text = 'Please quote this.\n\nZjQcmQRYFpfptBannerEnd\n\nThanks.\n'
+
+        out = email_cleaner.clean_email_body(text)
+
+        self.assertNotIn('Banner', out)
+        self.assertIn('Thanks.', out)
+
+    def test_an_unbannered_email_is_untouched(self):
+        text = 'Hi,\n\nCan you quote part 305A?\n\nThanks,\nSam\n'
+
+        self.assertEqual(
+            email_cleaner.clean_email_body(text),
+            'Hi,\n\nCan you quote part 305A?\n\nThanks,\nSam',
+        )
+
+    def test_the_cache_files_header_block_is_preserved(self):
+        # get_lead_email_thread() cleans email_cache/*.txt whole, header and
+        # all; the preheader cut is anchored so that header is not eaten.
+        text = (
+            'From: A <a@example.com>\nDate: 2026-08-14\nSubject: Seals\n'
+            + '=' * 60 + '\n\n'
+            + 'run-on preheader copy\n\nZjQcmQRYFpfptBannerStart\n\n'
+              'This Message Is From an External Sender\n\n'
+              'ZjQcmQRYFpfptBannerEnd\n\nThe actual question.\n'
+        )
+
+        out = email_cleaner.clean_email_body(text)
+
+        self.assertIn('From: A <a@example.com>', out)
+        self.assertIn('Subject: Seals', out)
+        self.assertIn('The actual question.', out)
+        self.assertNotIn('run-on preheader copy', out)
+        self.assertNotIn('Banner', out)
+
+    def test_the_ai_compaction_path_strips_it_too(self):
+        # Otherwise the extractor pays tokens for the duplicate and has to
+        # reconcile a truncated copy against the real one.
+        out = email_cleaner.compact_for_ai(self.BANNERED)
+
+        self.assertNotIn('BannerStart', out)
+        self.assertNotIn('External Sender', out)
+        self.assertEqual(out.count('Good afternoon'), 1)
 
 
 class EmailCleanerTests(unittest.TestCase):
@@ -485,7 +641,7 @@ class OracleApiTests(unittest.TestCase):
             'market': 'AEROSPACE/DEFENSE',
             'lead_details': 'Request for technical guidance.',
             'campaign': 'Seal Starter',
-            'assigned_tm': 'Daniel Smoliga',
+            'assigned_tm': 'John Pan',
         }
         payload, project_name, warnings = oracle_api.build_lead_payload(
             lead, 'Cadenas RFQ', source_label='', lead_source='Website'
@@ -498,7 +654,7 @@ class OracleApiTests(unittest.TestCase):
         self.assertEqual(payload['PrimaryContactProvince'], 'QUEBEC')
         self.assertNotIn('PrimaryContactState', payload)
         self.assertEqual(payload['IndustryDescriptionBSE_c'], 'AEROSPACE/DEFENSE')
-        self.assertEqual(payload['OwnerPartyName'], 'Daniel Smoliga')
+        self.assertEqual(payload['OwnerPartyName'], 'John Pan')
         self.assertEqual(payload['PhoneAreaCodeBSE_c'], '819')
         self.assertEqual(payload['PhoneNumberBSE_c'], '821-7657')
         self.assertFalse(warnings)

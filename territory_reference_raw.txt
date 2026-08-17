@@ -5,16 +5,22 @@ Source: Bal Seal's internal "Sales - Sales Territory" page
 Supplied by Keaton as a PDF (Territories.pdf) on 2026-07-20. This is the authoritative
 source -- see territory_map.py for the structured version consumed by the pipeline.
 
+PERSONNEL CHANGES SINCE THE 09/11/2025 SHEET -- applied below, so the tables here
+no longer match the PDF word for word:
+  * 2026-08-10: Lisa Wolf left; the Americas (Rest of World) list passed to John Pan.
+  * 2026-08-14: Daniel Smoliga was replaced by John Pan, who now also holds NORTHEAST.
+Both are reflected in territory_map.py. Reconcile when the sheet is reissued.
+
 An earlier plain-text paste of the same table (before the PDF was supplied) lost its
 row/column alignment during copy/paste and was NOT used for anything -- notably, a
 naive reconstruction of that paste would have put Israel and Austria under Serdar Eren,
 which is wrong; the real table (below) puts both under Davide Amato.
 
 === US Sales Territory ===
-Columns: Daniel Smoliga (NORTHEAST) | Brian Carter (WEST) | Jeff Frederick (SOUTHERN CALIFORNIA)
+Columns: John Pan (NORTHEAST) | Brian Carter (WEST) | Jeff Frederick (SOUTHERN CALIFORNIA)
 | Mark Copeland (SOUTH) | Wade Kahout (MIDWEST) | Bill Rost (MIDEAST)
 
-Daniel Smoliga (NORTHEAST): Connecticut, Delaware, Massachusetts, Maine, New Hampshire,
+John Pan (NORTHEAST): Connecticut, Delaware, Massachusetts, Maine, New Hampshire,
 New Jersey, New York, Pennsylvania Zip 17000 & Above, Rhode Island, Vermont,
 NL (Canada), NS (Canada), QC (Canada)
 
@@ -67,7 +73,7 @@ Sam Tam (CHINA, TAIWAN, INDIA, SOUTHEAST ASIA, OCEANIA):
 === Rest of World (explicit Country -> TM pairs) ===
 Americas: Mexico, Guatemala, Nicaragua, Costa Rica, Cuba, Dominican Republic,
 Puerto Rico, Colombia, Ecuador, Peru, Guyana, Suriname, French Guiana, Brazil,
-Bolivia, Chile, Paraguay, Argentina, Uruguay -> all Lisa Wolf
+Bolivia, Chile, Paraguay, Argentina, Uruguay -> all John Pan
 Venezuela -> NA (no TM assigned)
 
 EMEA: Sardegna (Island), Cagliari (Island), Morocco, Algeria, Tunisia -> Davide Amato

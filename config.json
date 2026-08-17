@@ -8,7 +8,15 @@
   "outlook": {
     "mailbox_name": "Sales",
     "forward_from_address": "sales@balseal.com",
-    "mark_reviewed": false
+    "mark_reviewed": false,
+    "mark_ingested": true,
+    "allow_email_delete": true
+  },
+  "hq_lookup": {
+    "enabled": true,
+    "max_fetches": 6,
+    "budget_seconds": 60,
+    "min_confidence": 0.6
   },
   "dashboard": {
     "host": "127.0.0.1",

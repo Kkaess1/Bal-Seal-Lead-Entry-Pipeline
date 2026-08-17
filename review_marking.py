@@ -45,6 +45,41 @@ def marking_enabled():
     return bool(config.get('outlook', {}).get('mark_reviewed', True))
 
 
+def ingest_marking_enabled():
+    """
+    Whether to green-tag an email as soon as the pipeline has ingested it
+    (config.json -> outlook.mark_ingested, default on).
+
+    Separate switch from mark_reviewed: that one tags an email once every lead
+    from it has been decided, this one tags it the moment its leads are pulled.
+    Both write the same green category, so with this on, the tag means "the
+    pipeline has read this email", not "this lead has been entered in Oracle".
+    """
+    try:
+        with open(CONFIG_PATH, encoding='utf-8') as f:
+            config = json.load(f)
+    except (OSError, ValueError):
+        return True
+    return bool(config.get('outlook', {}).get('mark_ingested', True))
+
+
+def mark_email_ingested(source_message_id):
+    """
+    Green-tag a just-ingested email. Never raises: a mailbox that could not be
+    tagged is not a reason to fail an ingest run that has already stored its
+    leads. The cost of a miss is that the email is read again on a later run,
+    which message and lead idempotency already handle.
+    """
+    if not source_message_id or not ingest_marking_enabled():
+        return False
+    try:
+        outlook_ingest.mark_ingested(source_message_id)
+        return True
+    except Exception as e:
+        logger.warning(f'Could not mark message {source_message_id} ingested in Outlook: {e}')
+        return False
+
+
 def maybe_mark_email_reviewed(lead_id):
     """
     Once every lead tied to a given source email is in a decided state --
