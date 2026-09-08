@@ -18,12 +18,9 @@ import territory_map
 
 
 # --- US Sales Territory, page 1 of the sheet -------------------------------
-# The PDF says Daniel Smoliga for the Northeast. He was replaced by John Pan on
-# 2026-08-14 and the sheet is a scan that has not been reissued, so this
-# intentionally differs from it -- as does the Americas row below, and for the
-# same reason. See territory_map.py. John Pan now holds both regions.
-NORTHEAST = 'John Pan'
-WEST = 'Brian Carter'
+# 2026-08-18: John Pan's NORTHEAST territories were transferred to Bill Rost.
+NORTHEAST = 'Bill Rost'
+WEST = 'Keaton Kaess'
 SOCAL = 'Jeff Frederick'
 SOUTH = 'Mark Copeland'
 MIDWEST = 'Wade Kahout'
@@ -100,7 +97,7 @@ class UsTerritoryTests(unittest.TestCase):
         self.assertEqual(tm, MIDEAST)
 
     def test_california_splits_on_zip(self):
-        # "CA Zip 93599 & Below" -> Jeff Frederick, "93600 & Above" -> Brian Carter.
+        # "CA Zip 93599 & Below" -> Jeff Frederick, "93600 & Above" -> Keaton Kaess.
         self.assertEqual(
             territory_map.assign_tm({'state': 'CA', 'zip': '92610'})[0], SOCAL)
         self.assertEqual(
@@ -110,26 +107,30 @@ class UsTerritoryTests(unittest.TestCase):
         self.assertEqual(
             territory_map.assign_tm({'state': 'CA', 'zip': '95120'})[0], WEST)
 
-    def test_pennsylvania_splits_on_zip(self):
-        # "Pennsylvania Zip 16999 & Below" -> Bill Rost, "17000 & Above" -> Northeast.
+    def test_pennsylvania_routes_to_bill_rost(self):
+        # All Pennsylvania ZIPs (both <= 16999 and >= 17000) -> Bill Rost.
         self.assertEqual(
             territory_map.assign_tm({'state': 'PA', 'zip': '15201'})[0], MIDEAST)
         self.assertEqual(
             territory_map.assign_tm({'state': 'PA', 'zip': '16999'})[0], MIDEAST)
         self.assertEqual(
-            territory_map.assign_tm({'state': 'PA', 'zip': '17000'})[0], NORTHEAST)
+            territory_map.assign_tm({'state': 'PA', 'zip': '17000'})[0], MIDEAST)
         self.assertEqual(
-            territory_map.assign_tm({'state': 'PA', 'zip': '19104'})[0], NORTHEAST)
+            territory_map.assign_tm({'state': 'PA', 'zip': '19104'})[0], MIDEAST)
 
     def test_a_split_state_without_a_zip_asks_for_review(self):
         # Guessing here would hand the lead to the wrong half of the state.
-        for state in ('CA', 'PA'):
+        for state in ('CA',):
             tm, basis = territory_map.assign_tm({'state': state})
             self.assertIsNone(tm, state)
             self.assertIn('ZIP', basis, state)
 
+    def test_pennsylvania_without_a_zip_routes_to_bill_rost(self):
+        tm, basis = territory_map.assign_tm({'state': 'PA'})
+        self.assertEqual(tm, MIDEAST, basis)
+
     def test_nevada_splits_on_clark_county(self):
-        # Clark County -> Jeff Frederick; the rest of Nevada -> Brian Carter.
+        # Clark County -> Jeff Frederick; the rest of Nevada -> Keaton Kaess.
         vegas, basis = territory_map.assign_tm({'state': 'NV', 'zip': '89101'})
         self.assertEqual(vegas, SOCAL, basis)
         reno, basis = territory_map.assign_tm({'state': 'NV', 'zip': '89501'})

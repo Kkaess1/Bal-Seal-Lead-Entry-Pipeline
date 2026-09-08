@@ -7,6 +7,7 @@ only performs GET requests and writes reporting snapshots to SQLite.
 import argparse
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -213,6 +214,14 @@ def sync_all(client, candidates=None):
     db.set_run_state('oracle_sync_finished_at', finished_at)
     db.set_run_state('oracle_sync_status', 'ok' if not result['failed'] else 'partial')
     db.set_run_state('oracle_sync_result', json.dumps(result, sort_keys=True))
+
+    lease_token = os.environ.get('PIPELINE_ORACLE_SYNC_LEASE_TOKEN')
+    if lease_token:
+        db.update_run_lease(
+            'job:manual_oracle_sync', lease_token,
+            'succeeded' if not result['failed'] else 'failed',
+            json.dumps(result),
+        )
     return result
 
 

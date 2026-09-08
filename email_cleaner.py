@@ -251,10 +251,57 @@ def _is_contact_label(label):
     )
 
 
+def _pair_is_awaiting_answer(pairs):
+    """True when the last pair is a label whose answer has not arrived yet."""
+    return bool(pairs) and not any(line.strip() for line in pairs[-1][1])
+
+
+def _uses_indented_answers(text):
+    """
+    True for the layout in which every answer sits in a second table cell,
+    leaving the first one empty:
+
+        Name*<TAB>
+        <TAB>Tom Kivisto<TAB>
+
+    That empty leading cell is what tells an answer from a label, and it is
+    the only thing the two layouts differ by, so it is decided once for the
+    whole body rather than line by line -- a body that has it anywhere is
+    parsed the old way throughout.
+    """
+    for raw_line in text.split('\n'):
+        cells = [cell.strip() for cell in raw_line.rstrip('\r').split('\t')]
+        if len(cells) > 1 and not cells[0] and any(cells[1:]):
+            return True
+    return False
+
+
 def _parse_form_pairs(text):
     """Splits a tab-delimited form-submission body into [label, value_lines]
     pairs. Untabbed lines continue the answer above them, which is what keeps
-    a multi-paragraph free-text answer intact."""
+    a multi-paragraph free-text answer intact.
+
+    Two layouts have to survive this, and they differ only by a leading empty
+    table cell. Gravity Forms used to wrap every answer in one, so an answer
+    was recognisable by its empty first column:
+
+        Name*<TAB>
+        <TAB>Tom Kivisto<TAB>
+
+    Around 2026-08-27 the same form started emitting answers flush left:
+
+        Name*<TAB>
+        test<TAB>
+
+    which made every line look like a label in the first column. They all
+    then collapsed into a single pair, _is_contact_label() matched nothing,
+    and extract_form_submission() rejected the email as "not a form" -- so
+    the entire raw table landed in the lead Description as one run-on
+    paragraph (leads 492 and 500-503). Hence _pair_is_awaiting_answer():
+    both layouts alternate label/answer regardless, so a lone first-column
+    cell sitting under a label that has no answer yet *is* that answer.
+    """
+    indented = _uses_indented_answers(text)
     pairs = []
     for raw_line in text.split('\n'):
         # Only \r is stripped, never trailing tabs -- a label alone on its
@@ -270,10 +317,22 @@ def _parse_form_pairs(text):
         if len(filled) >= 2:
             pairs.append([filled[0], [' '.join(filled[1:])]])
         elif len(filled) == 1:
-            if cells[0]:
+            if cells[0] and (indented
+                             or not _pair_is_awaiting_answer(pairs)
+                             or _is_contact_label(filled[0])):
                 # Label alone on its line; the answer follows below it.
+                #
+                # In the flush-left layout the two kinds of line are
+                # identical in shape, so pairing goes by alternation -- which
+                # a stray caption line ("Map It" under an address) would
+                # otherwise shift by one for the whole rest of the table.
+                # _is_contact_label() re-anchors it: a known field name is a
+                # label, never somebody's answer to the prompt above it.
                 pairs.append([filled[0], []])
             elif pairs:
+                # An indented cell, or -- in the flush-left layout -- a cell
+                # sitting directly under a label that is still missing its
+                # answer. Either way, the answer to the label above.
                 pairs[-1][1].append(filled[0])
         elif pairs:
             pairs[-1][1].append('')
@@ -330,6 +389,14 @@ def extract_form_submission(text):
     if not text or '\t' not in text:
         return None
 
+    # Tracking and mailto URLs come off before the table is parsed, not after.
+    # They ride along inside cells ("Map It <SafeLinks redirect>", the consent
+    # checkbox's tick.png), and a label carrying one no longer matches
+    # _is_contact_label(), so the row survives into the Description as a
+    # fragment of form chrome. clean_email_body() strips these anyway; doing it
+    # first is what lets the label be recognised.
+    text = _LONG_BRACKETED_URL_RE.sub('', _MAILTO_RE.sub('', text))
+
     pairs = _merge_unanswered_pairs(_parse_form_pairs(text))
     contact_rows = sum(1 for label, _ in pairs if _is_contact_label(label))
     if len(pairs) < 3 or contact_rows < 2:
@@ -355,6 +422,27 @@ def extract_form_submission(text):
     return '\n\n'.join(blocks) or None
 
 
+MAX_EMAIL_PARSE_LENGTH = 3000
+TRUNCATION_NOTICE = (
+    "\n\n[Note: This email exceeds 3,000 characters. Only the first 3,000 characters "
+    "were parsed and displayed. View the original email in Outlook to read the full message.]"
+)
+
+
+def truncate_body_if_needed(text, max_chars=MAX_EMAIL_PARSE_LENGTH, notice=TRUNCATION_NOTICE):
+    """
+    If an email body or text exceeds max_chars (default 3000), truncate to max_chars
+    and append a notice indicating more content exists in the original email.
+    """
+    if not text:
+        return text
+    if len(text) <= max_chars:
+        return text
+    if notice in text:
+        return text
+    return f"{text[:max_chars].rstrip()}{notice}"
+
+
 def clean_email_body(text):
     """Returns a cleaned copy of `text` for display. Safe to call on already
     short/clean text -- a no-op in that case."""
@@ -373,7 +461,7 @@ def clean_email_body(text):
     if form_text:
         text = form_text
 
-    for pattern in (_QUOTE_HEADER_RE, _ON_WROTE_RE, _ORIGINAL_MESSAGE_RE, _AUTOMATED_FOOTER_RE):
+    for pattern in (_AUTOMATED_FOOTER_RE,):
         m = pattern.search(text)
         if m:
             text = text[:m.start()]
@@ -399,8 +487,8 @@ def clean_email_body(text):
     lines = [re.sub(r'[ \t]{2,}', ' ', ln).rstrip() for ln in lines]
     text = '\n'.join(lines)
 
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    return truncate_body_if_needed(text)
 
 
 def extract_quoted_history(text, max_chars=40000):
@@ -450,7 +538,7 @@ def extract_quoted_history(text, max_chars=40000):
     return quoted
 
 
-def compact_for_ai(text, max_chars=20000):
+def compact_for_ai(text, max_chars=MAX_EMAIL_PARSE_LENGTH):
     """
     Strip an email down to what is worth paying a model to read.
 

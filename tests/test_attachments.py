@@ -54,6 +54,16 @@ class VisibleAttachmentTests(unittest.TestCase):
 
         self.assertEqual(kinds, ['drawing/CAD', 'image', 'document'])
 
+    def test_inline_signature_images_with_mapi_flag_are_skipped(self):
+        item, atts = _item_with_attachments('signature_logo.png', 'seal_drawing.pdf')
+        # Simulate MAPI PropertyAccessor PR_ATTACH_FLAGS = 4 for inline signature logo
+        atts[0].PropertyAccessor.GetProperty.return_value = 4
+        atts[1].PropertyAccessor.GetProperty.return_value = 0
+
+        listed = outlook_ingest.list_attachments(item)
+        self.assertEqual([a['name'] for a in listed], ['seal_drawing.pdf'])
+
+
 
 class SaveAttachmentTests(unittest.TestCase):
     def setUp(self):

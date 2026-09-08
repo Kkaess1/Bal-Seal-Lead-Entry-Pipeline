@@ -99,6 +99,8 @@
                 <span class="ready-status">
                   {%- if lead.status == 'submitting' -%}
                     Sending to Oracle{% if lead.sending_since %} since {{ lead.sending_since }}{% endif %}
+                  {%- elif lead.status == 'failed' -%}
+                    <strong style="color: #dc2626;">Submission Failed — see error below</strong>
                   {%- else -%}
                     Approved — waiting for submission worker
                   {%- endif -%}
@@ -106,16 +108,11 @@
                 Market: <strong>{{ lead.market or 'INDUSTRIAL' }}</strong> &bull;
                 TM: <strong>{{ lead.assigned_tm or 'Unassigned' }}</strong>
               </div>
-              {% if lead.sending_is_stuck %}
-                <div class="meta" style="margin-top: 0.35rem;">
-                  This submission stopped without finishing — the run holding it
-                  is gone. Release it to check Oracle and decide what happens next.
+              {% if lead.submit_error %}
+                <div class="submit-error-notice" role="alert" style="margin: var(--s-3) 0 0;">
+                  <strong>Not sent to Oracle.</strong> {{ lead.submit_error|replace('Submission blocked: ', '') }}
                 </div>
-              {% endif %}
-              {# An approved lead missing something Oracle requires will never
-                 be sent, however long it waits here. Say so, and offer the way
-                 back to the form where it gets fixed. #}
-              {% if lead.blockers and lead.can_recall %}
+              {% elif lead.blockers and lead.can_recall %}
                 <div class="submit-error-notice" role="alert" style="margin: var(--s-3) 0 0;">
                   <strong>This lead cannot be sent.</strong> {{ lead.blockers|join(' ') }}
                   Take it back to Pending Review to correct it.

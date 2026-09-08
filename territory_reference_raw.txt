@@ -8,8 +8,9 @@ source -- see territory_map.py for the structured version consumed by the pipeli
 PERSONNEL CHANGES SINCE THE 09/11/2025 SHEET -- applied below, so the tables here
 no longer match the PDF word for word:
   * 2026-08-10: Lisa Wolf left; the Americas (Rest of World) list passed to John Pan.
-  * 2026-08-14: Daniel Smoliga was replaced by John Pan, who now also holds NORTHEAST.
-Both are reflected in territory_map.py. Reconcile when the sheet is reissued.
+  * 2026-08-14: Daniel Smoliga was replaced by John Pan, who held NORTHEAST.
+  * 2026-08-18: John Pan's NORTHEAST territories (CT, DE, MA, ME, NH, NJ, NY, PA Zip 17000 & Above, RI, VT, NL, NS, QC) transferred to Bill Rost.
+Reflected in territory_map.py. Reconcile when the sheet is reissued.
 
 An earlier plain-text paste of the same table (before the PDF was supplied) lost its
 row/column alignment during copy/paste and was NOT used for anything -- notably, a
@@ -17,12 +18,12 @@ naive reconstruction of that paste would have put Israel and Austria under Serda
 which is wrong; the real table (below) puts both under Davide Amato.
 
 === US Sales Territory ===
-Columns: John Pan (NORTHEAST) | Brian Carter (WEST) | Jeff Frederick (SOUTHERN CALIFORNIA)
-| Mark Copeland (SOUTH) | Wade Kahout (MIDWEST) | Bill Rost (MIDEAST)
+Columns: Bill Rost (NORTHEAST & MIDEAST) | Brian Carter (WEST) | Jeff Frederick (SOUTHERN CALIFORNIA)
+| Mark Copeland (SOUTH) | Wade Kahout (MIDWEST) | John Pan (AMERICAS)
 
-John Pan (NORTHEAST): Connecticut, Delaware, Massachusetts, Maine, New Hampshire,
-New Jersey, New York, Pennsylvania Zip 17000 & Above, Rhode Island, Vermont,
-NL (Canada), NS (Canada), QC (Canada)
+Bill Rost (NORTHEAST & MIDEAST): Connecticut, Delaware, Massachusetts, Maine, New Hampshire,
+New Jersey, New York, Pennsylvania (all ZIPs), Rhode Island, Vermont, Illinois, Indiana,
+Kansas, Kentucky, Michigan, Missouri, Ohio, West Virginia, NL (Canada), NS (Canada), QC (Canada), ON (Canada)
 
 Brian Carter (WEST): Alaska, CA Zip 93600 & Above, Colorado, Hawaii, Idaho, Montana,
 Oregon, Utah, Washington, Wyoming, AB (Canada), BC (Canada), NWT (Canada), SK (Canada),
@@ -36,9 +37,6 @@ Mississippi, North Carolina, Oklahoma, South Carolina, Tennessee, Texas, Virgini
 
 Wade Kahout (MIDWEST): Iowa, Minnesota, North Dakota, Nebraska, South Dakota, Wisconsin,
 MB (Canada), NU (Canada)
-
-Bill Rost (MIDEAST): Illinois, Indiana, Kansas, Kentucky, Michigan, Missouri, Ohio,
-Pennsylvania Zip 16999 & Below, West Virginia, ON (Canada)
 
 Note: New Brunswick and Prince Edward Island are not listed anywhere in the source table.
 

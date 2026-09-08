@@ -30,8 +30,8 @@ class CompactionKeepsWhatTheExtractorNeedsTests(unittest.TestCase):
 
         for needle in ('Terri Taggart', 'motion.com', 'Motion', '(555) 123-4567'):
             self.assertIn(needle, compacted, needle)
-        # ...whereas the display cleaner deliberately throws that away.
-        self.assertNotIn('motion.com', email_cleaner.clean_email_body(body))
+        # ...and clean_email_body also retains the quoted thread history.
+        self.assertIn('motion.com', email_cleaner.clean_email_body(body))
 
     def test_form_contact_rows_survive(self):
         body = (

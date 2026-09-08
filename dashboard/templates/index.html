@@ -3,6 +3,20 @@
 {% block content %}
   <div class="page-head">
     <h2>Pending Review ({{ leads|length }})</h2>
+    <div class="actions" style="margin-top: 0;">
+    {# A lead that never arrived as an email -- a call, a card, a forward.
+       Beside the ingest button because both answer "get a lead in front of
+       me", and this is the only page where that question is asked. #}
+    <a class="btn btn-secondary" href="{{ url_for('new_lead') }}"
+       title="Enter a lead by hand from pasted notes or a screenshot">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+           style="width:16px;height:16px;">
+        <path d="M12 5v14"></path>
+        <path d="M5 12h14"></path>
+      </svg>
+      Create lead
+    </a>
     <form method="post" action="{{ url_for('ingest_now') }}" id="ingest-form">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn-approve"
@@ -16,12 +30,19 @@
         Click to ingest leads
       </button>
     </form>
+    </div>
   </div>
 
   {% for message in get_flashed_messages(category_filter=['ingest_success']) %}
     <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}); });</script>
   {% endfor %}
   {% for message in get_flashed_messages(category_filter=['ingest_error']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}, 'error'); });</script>
+  {% endfor %}
+  {% for message in get_flashed_messages(category_filter=['manual_success']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}); });</script>
+  {% endfor %}
+  {% for message in get_flashed_messages(category_filter=['manual_error']) %}
     <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}, 'error'); });</script>
   {% endfor %}
 
@@ -115,8 +136,10 @@
           <button type="submit" class="btn-reject">Reject</button>
         </form>
 
+        {# No Outlook message behind a hand-entered lead, so nothing here to
+           reply to, forward or delete. See _decorate(). #}
         <div class="email-actions">
-          {% if delete_enabled %}
+          {% if lead.has_source_email and delete_enabled %}
             <button type="button" class="btn email-action email-action-danger open-delete-dialog"
                     data-delete-url="{{ url_for('delete_lead_email', lead_id=lead.id) }}"
                     data-lead-name="{{ lead.display_name }}"
@@ -134,6 +157,7 @@
               Delete
             </button>
           {% endif %}
+          {% if lead.has_source_email %}
           <button type="button" class="btn email-action open-reply-dialog"
                   data-reply-url="{{ url_for('reply_lead_email', lead_id=lead.id) }}"
                   data-lead-name="{{ lead.display_name }}"
@@ -160,6 +184,7 @@
             </svg>
             Forward
           </button>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -221,10 +246,15 @@
         });
 
         var closeDialog = function() { dialog.close(); };
+        var backdropMousedown = false;
+        dialog.addEventListener('mousedown', function(event) {
+          backdropMousedown = (event.target === dialog);
+        });
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.forward-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
-          if (event.target === dialog) closeDialog();
+          if (event.target === dialog && backdropMousedown) closeDialog();
+          backdropMousedown = false;
         });
       })();
     </script>
@@ -347,10 +377,15 @@
         });
 
         var closeDialog = function() { dialog.close(); };
+        var backdropMousedown = false;
+        dialog.addEventListener('mousedown', function(event) {
+          backdropMousedown = (event.target === dialog);
+        });
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.reply-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
-          if (event.target === dialog) closeDialog();
+          if (event.target === dialog && backdropMousedown) closeDialog();
+          backdropMousedown = false;
         });
       })();
     </script>
@@ -398,10 +433,15 @@
         });
 
         var closeDialog = function() { dialog.close(); };
+        var backdropMousedown = false;
+        dialog.addEventListener('mousedown', function(event) {
+          backdropMousedown = (event.target === dialog);
+        });
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.delete-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
-          if (event.target === dialog) closeDialog();
+          if (event.target === dialog && backdropMousedown) closeDialog();
+          backdropMousedown = false;
         });
       })();
     </script>

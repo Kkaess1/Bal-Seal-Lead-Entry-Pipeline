@@ -6,8 +6,11 @@
   .status-hero p { margin:.2rem 0 0; color:var(--text-muted); }
   .sync-chip { border:1px solid var(--border); background:var(--surface); border-radius:999px; padding:.45rem .8rem; font-size:.78rem; white-space:nowrap; }
   .kpi-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.8rem; margin-bottom:1rem; }
+  .rates-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.8rem; margin-bottom:1rem; }
   .kpi { background:var(--surface); border:1px solid var(--border); border-top:3px solid var(--navy); border-radius:var(--radius); padding:1rem; box-shadow:var(--shadow); }
   .kpi.orange { border-top-color:var(--orange); } .kpi.green { border-top-color:var(--success); } .kpi.blue { border-top-color:var(--accent); }
+  .rate-kpi { background:var(--surface); border:1px solid var(--border); border-top:3px solid var(--navy); border-radius:var(--radius); padding:1rem; box-shadow:var(--shadow); }
+  .rate-kpi.teal { border-top-color:#0d9488; } .rate-kpi.purple { border-top-color:#7c3aed; } .rate-kpi.green { border-top-color:var(--success); }
   .kpi-label { color:var(--text-muted); font-size:.74rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
   .kpi-value { font-family:'Raleway',sans-serif; font-size:1.85rem; font-weight:800; line-height:1.2; margin:.25rem 0; }
   .kpi-note { color:var(--text-faint); font-size:.74rem; }
@@ -30,7 +33,7 @@
   .ops-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; margin-top:1rem; }
   .ops-grid table { width:100%; font-size:.8rem; }
   .ops-grid td { border-bottom:1px solid var(--border); padding:.35rem; overflow-wrap:anywhere; }
-  @media(max-width:800px) { .kpi-grid{grid-template-columns:repeat(2,1fr)} .funnel{grid-template-columns:repeat(2,1fr)} .ops-grid{grid-template-columns:1fr} .status-hero{display:block} .sync-chip{display:inline-block;margin-top:.7rem} }
+  @media(max-width:800px) { .kpi-grid{grid-template-columns:repeat(2,1fr)} .rates-grid{grid-template-columns:1fr} .funnel{grid-template-columns:repeat(2,1fr)} .ops-grid{grid-template-columns:1fr} .status-hero{display:block} .sync-chip{display:inline-block;margin-top:.7rem} }
 </style>
 
 <div class="status-hero">
@@ -38,11 +41,33 @@
     <h2>Lead performance</h2>
     <p>From intake and review through Oracle qualification and conversion.</p>
   </div>
-  <div class="sync-chip">
-    Oracle sync: <strong>{{ state.oracle_sync_status or 'not run' }}</strong>
-    {% if state.oracle_sync_finished_at %}&middot; {{ state.oracle_sync_finished_at[:16]|replace('T',' ') }} UTC{% endif %}
+  <div style="display:flex; align-items:center; gap:.6rem; flex-wrap:wrap;">
+    <div class="sync-chip" title="Synced means lead details, qualification dates, and opportunities have been refreshed from Oracle Fusion Sales">
+      Oracle sync: <strong>{{ state.oracle_sync_status or 'not run' }}</strong>
+      {% if state.oracle_sync_finished_at %}&middot; {{ state.oracle_sync_finished_at[:16]|replace('T',' ') }} UTC{% endif %}
+    </div>
+    <form method="post" action="{{ url_for('trigger_oracle_sync') }}" style="margin:0;">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <button class="btn btn-secondary" type="submit" {% if state.oracle_sync_status == 'running' %}disabled{% endif %}>
+        {% if state.oracle_sync_status == 'running' %}
+          Syncing...
+        {% else %}
+          Sync from Oracle
+        {% endif %}
+      </button>
+    </form>
   </div>
 </div>
+
+{% for message in get_flashed_messages(category_filter=['oracle_sync_success']) %}
+  <div class="forward-notice forward-notice-success" role="status" style="margin-bottom:1rem;">{{ message }}</div>
+{% endfor %}
+{% for message in get_flashed_messages(category_filter=['oracle_sync_notice']) %}
+  <div class="forward-notice forward-notice-success" role="status" style="margin-bottom:1rem;">{{ message }}</div>
+{% endfor %}
+{% for message in get_flashed_messages(category_filter=['oracle_sync_error']) %}
+  <div class="forward-notice forward-notice-error" role="alert" style="margin-bottom:1rem;">{{ message }}</div>
+{% endfor %}
 
 <section class="kpi-grid" aria-label="Lead summary">
   <div class="kpi"><div class="kpi-label">All leads</div><div class="kpi-value">{{ local_summary.total }}</div><div class="kpi-note">Received by this pipeline</div></div>
@@ -51,9 +76,27 @@
   <div class="kpi green"><div class="kpi-label">Converted</div><div class="kpi-value">{{ oracle_summary.converted }}</div><div class="kpi-note">Leads with an Oracle opportunity</div></div>
 </section>
 
+<section class="rates-grid" aria-label="Conversion performance">
+  <div class="rate-kpi teal">
+    <div class="kpi-label">Qualification Rate</div>
+    <div class="kpi-value">{{ conversion_rates.qualification_rate }}%</div>
+    <div class="kpi-note">{{ oracle_summary.qualified }} of {{ local_summary.submitted }} submitted leads qualified in Oracle</div>
+  </div>
+  <div class="rate-kpi purple">
+    <div class="kpi-label">Opportunity Conversion</div>
+    <div class="kpi-value">{{ conversion_rates.conversion_rate }}%</div>
+    <div class="kpi-note">{{ oracle_summary.converted }} of {{ local_summary.submitted }} submitted leads converted to Opportunities</div>
+  </div>
+  <div class="rate-kpi green">
+    <div class="kpi-label">Overall Conversion Rate</div>
+    <div class="kpi-value">{{ conversion_rates.end_to_end_rate }}%</div>
+    <div class="kpi-note">{{ oracle_summary.converted }} converted of {{ local_summary.total }} total pipeline intake leads</div>
+  </div>
+</section>
+
 <section class="card">
   <h3>Oracle sales funnel</h3>
-  <p class="meta">Counts reflect the most recent successful read-only sync.</p>
+  <p class="meta">Counts reflect the most recent successful read-only sync. <strong>Synced</strong> means local records match active lead outcomes fetched from Oracle CRM.</p>
   <div class="funnel">
     <div class="funnel-step"><strong>{{ local_summary.submitted }}</strong><span>Sent to Oracle</span></div>
     <div class="funnel-step"><strong>{{ oracle_summary.synced }}</strong><span>Synced</span></div>
@@ -64,7 +107,12 @@
 
 <section class="card">
   <h3>Find a submitted lead</h3>
-  <p class="meta">Only leads created in Oracle by this pipeline are listed.</p>
+  <p class="meta">Only leads created in Oracle by this pipeline are listed.
+  {% if purged_total %}
+    The counts above include {{ purged_total }} lead{{ '' if purged_total == 1 else 's' }}
+    deleted by the retention policy &mdash; those cannot be searched here, but their
+    record is still in Oracle.
+  {% endif %}</p>
   <nav class="outcome-filters" aria-label="Filter lead outcomes">
     <a class="outcome-filter {{ 'active' if outcome == 'all' }}" href="{{ url_for('status', outcome='all', q=query) }}">All submitted</a>
     <a class="outcome-filter {{ 'active' if outcome == 'qualified' }}" href="{{ url_for('status', outcome='qualified', q=query) }}">Qualified</a>
@@ -78,14 +126,20 @@
   </form>
   <div class="table-scroll">
     <table class="outcome-table">
-      <thead><tr><th>Lead</th><th>Local</th><th>Oracle</th><th>Qualified</th><th>Opportunities</th></tr></thead>
+      <thead><tr><th>Lead</th><th>Local</th><th>Oracle</th><th>Time to qualify</th><th>Opportunities</th></tr></thead>
       <tbody>
       {% for item in outcomes %}
         <tr>
           <td><a class="lead-name" href="{{ url_for('lead_lifecycle', lead_id=item.id) }}">{{ (item.first_name or '') ~ ' ' ~ (item.last_name or '') }}</a><div class="subtle">{{ item.organization or item.email or 'Lead #' ~ item.id }}</div></td>
           <td><span class="badge badge-{{ 'clear' if item.local_status == 'submitted' else 'reject' if item.local_status in ('rejected','failed') else 'review' }}">{{ item.local_status|replace('_',' ') }}</span></td>
           <td>{{ item.oracle_status or '—' }}{% if item.sync_error %}<div class="subtle">Sync error</div>{% endif %}</td>
-          <td>{{ item.qualified_at[:10] if item.qualified_at else '—' }}</td>
+          <td title="{% if item.qualified_at %}Qualified on {{ item.qualified_at[:10] }}{% endif %}">
+            {% if item.days_to_qualify is not none %}
+              {{ item.days_to_qualify }} {{ 'day' if item.days_to_qualify == 1 else 'days' }}
+            {% else %}
+              —
+            {% endif %}
+          </td>
           <td>{{ item.opportunity_count }}{% if item.has_won %}<div class="subtle">Won</div>{% endif %}</td>
         </tr>
       {% else %}
@@ -103,5 +157,21 @@
     <div><h3>Lead statuses</h3><table>{% for key,value in counts.items() %}<tr><td>{{ key|replace('_',' ') }}</td><td>{{ value }}</td></tr>{% endfor %}</table></div>
     <div><h3>Message statuses</h3><table>{% for key,value in message_counts.items() %}<tr><td>{{ key|replace('_',' ') }}</td><td>{{ value }}</td></tr>{% endfor %}</table></div>
   </div>
+  {# Every count on this page is a lifetime figure and will not match the
+     History page once leads start being deleted. Saying why here is what keeps
+     that from reading as a bug. #}
+  <h3 style="margin-top:1.2rem;">Retention</h3>
+  <p class="meta">
+    Rejected leads are deleted {{ retention_rejected_days }} days after they are rejected;
+    every other finished lead is deleted after {{ retention_finished_days }} days.
+    Leads still awaiting review are never deleted. Deletion is permanent, and removes the
+    cached email with the record.
+    {% if purged_total %}
+      <strong>{{ purged_total }} {{ 'lead has' if purged_total == 1 else 'leads have' }} been deleted so far</strong>;
+      every count on this page still includes {{ 'it' if purged_total == 1 else 'them' }}.
+    {% else %}
+      Nothing has been deleted yet.
+    {% endif %}
+  </p>
 </details>
 {% endblock %}

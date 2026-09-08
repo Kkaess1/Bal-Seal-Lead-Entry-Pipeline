@@ -7,13 +7,23 @@ records to Oracle Sales Cloud.
 ## One way in
 
 The Sales inbox (`outlook.mailbox_name` in `config.json`) is the only source
-of leads. `outlook_ingest.py` is scoped to that mailbox specifically and
-raises rather than falling back to the signed-in user's personal inbox.
+of leads that arrive on their own. `outlook_ingest.py` is scoped to that
+mailbox specifically and raises rather than falling back to the signed-in
+user's personal inbox.
 
-There is no second ingestion path by design. A dormant Microsoft Graph backend
-and a test-lead seeding script were removed on 2026-07-31 so that nothing can
-introduce a lead that did not arrive as mail in that inbox. Spreadsheets are
-still supported, but only as attachments on those emails.
+There is no second *automatic* ingestion path by design. A dormant Microsoft
+Graph backend and a test-lead seeding script were removed on 2026-07-31 so
+that nothing can introduce a lead unattended. Spreadsheets are still
+supported, but only as attachments on those emails.
+
+Since 2026-08-28 there is one deliberate exception, and it is a person, not a
+path: the **Create lead** button on Pending Review (see "Entering a lead by
+hand"). What the 2026-07-31 removal was actually protecting against was a
+lead appearing in the queue that nobody put there — a seeding script or a
+background integration quietly manufacturing records. A reviewer typing one
+in is the opposite of that: it happens one lead at a time, only when someone
+clicks, it is stamped `source='manual_entry'`, and it still has to be
+approved by hand like every other lead. Nothing about it runs unattended.
 
 **The green tag is the only thing that stops an email being ingested.** Every
 other new message in the Sales inbox is pulled in and staged in Pending
@@ -67,6 +77,67 @@ to `false` to go back to tagging only after review.
 email once every lead from it has been approved or rejected. With ingest
 tagging on it is mostly redundant, since the email is already green.
 
+## Entering a lead by hand
+
+Not every lead arrives as mail. A phone call, a business card from a trade
+show, a form a customer filled in while a rep watched, a colleague forwarding
+something to the wrong address — before 2026-08-28 all of those had to be
+typed into Oracle directly, outside this pipeline and outside its territory
+routing, duplicate checks and review.
+
+**Create lead** on Pending Review opens a box to paste into and a place to
+attach screenshots (or paste one straight in with Ctrl+V after Win+Shift+S,
+which is how it is actually used). `manual_lead.py` reads it, fills the same
+fields the email extractor fills, routes it through the same territory map,
+and leaves it in Pending Review as an ordinary lead. From there it is
+reviewed, edited and approved through exactly the same controls — that is the
+point of creating it in `pending_review` rather than in a staging state of
+its own.
+
+Three things about it are deliberate:
+
+- **Screenshots are read once and never stored.** They are customers' own
+  material, and keeping them would mean a folder of PII served back out of
+  the dashboard's own origin — the risk the Reference tab already refuses
+  `.svg` over. What is kept is `transcript`: the model reading the image out
+  *literally*, which is what lands in Oracle's Lead Details. That field is
+  held to the customer's own words rather than a summary (see
+  `lead_extractor.py`), and that rule does not stop applying because the
+  words arrived as pixels.
+
+- **No fraud screen.** The screen exists to judge unsolicited email; a
+  reviewer who has just typed a lead in has already made that judgment.
+  Nothing on this path can auto-reject and nothing skips human review.
+
+- **No head-office lookup.** `location_enrichment` and `hq_lookup` read the
+  open web and take the better part of a minute, which is too long to hold a
+  browser POST open. An unrouted manual lead gets the same way out an
+  unrouted ingested one does: the **Find the company's head office** button
+  on its own page.
+
+**Text on the clipboard always pastes as text.** Copying a message out of
+Outlook — or a range out of Excel, or anything out of Word — puts a bitmap of
+the selection on the clipboard *next to* the text, and the browser offers that
+bitmap to the paste handler as an `image/png` file. Until 2026-08-28 the
+handler took it: pasting an email attached a picture of the email, called
+`preventDefault()`, and left the notes box empty, so the lead was created
+"from a screenshot" with none of the words that had just been pasted. The
+handler now stands down whenever `text/plain` on the clipboard has anything in
+it. A Win+Shift+S snip carries no text flavour at all, so pasting a real
+screenshot still attaches it.
+
+The pasted text is still treated as untrusted input by the extraction prompt.
+A reviewer pasting a customer's email does not make the customer's words
+ours, and the same prompt-injection framing the email path uses applies here.
+
+An extraction failure does not lose the work: the lead is created regardless,
+with whatever came back and the reason in its extraction notes, because
+someone who has just pasted a customer's details should never lose them to an
+API outage.
+
+In Oracle these arrive labelled `Inquiry - Manual Entry`, so a hand-entered
+lead is distinguishable from a website inquiry rather than claiming to be one.
+
 ## Nothing runs on a timer
 
 Emails are read when you ask for them, with the **Click to ingest leads**
@@ -85,8 +156,11 @@ A message left in `new`/`error` by an interrupted run, and a lead left in
 `submitting`, are retried at the start of the next ingest or submit run. With
 nothing on a timer, "next run" means the next time you click.
 
-The only scheduled task left is the dashboard itself — see "Always-on
-dashboard" above.
+Two scheduled tasks exist, and neither reads mail or sends anything: the
+dashboard itself (see "Always-on dashboard" above) and the daily retention
+purge (see "Retention" below). Both were deliberate exceptions — the dashboard
+because it has to be up before you can click anything, and the purge because a
+deletion policy nobody remembers to run is not a policy.
 
 ## Nothing uploads on a timer
 
@@ -200,6 +274,8 @@ py pipeline_ingest.py
 py pipeline_ingest.py --recent 10
 py pipeline_submit.py
 py -m dashboard.serve
+py purge_old_leads.py            # dry run: what the retention policy would delete
+py purge_old_leads.py --apply    # actually delete it
 py -m unittest discover -s tests -v
 ```
 
@@ -417,6 +493,60 @@ A Playwright browser-automation submitter used to exist as a fallback and was
 removed on 2026-07-31 — it had not been the active path, and an unexercised
 fallback tends not to work when it is finally needed.
 
+### The owner, and why it silently was not one
+
+Oracle matches `OwnerPartyName` on create as an **exact, case-sensitive
+string**. A near-miss is not rejected -- it is discarded in silence: `201
+Created`, no warning, no field in the response saying anything happened, and
+the lead left owned by whoever the API authenticated as rather than by the
+rep it was routed to.
+
+This ran undetected for the first 43 submissions and surfaced on 2026-08-28
+only because someone opened a lead in Oracle and read the Owner box. Checking
+every submitted lead against its Oracle record gave a total correlation, with
+no exception in either direction:
+
+```text
+ 39  name matched Oracle's spelling exactly  ->  owner set at creation
+  0  name matched exactly                    ->  owner dropped
+  0  name differed                           ->  owner set at creation
+  3  name differed only in case              ->  owner dropped
+```
+
+The three were `Marcus James` where Oracle has `MARCUS JAMES`, and `john Pan`
+and `jeff Frederick` typed by hand into the dashboard's Territory box. The
+first is the one that mattered: that spelling sits in `territory_map.py`
+against the whole UK, Ireland and Scandinavia block -- twelve territory keys
+-- so *every* lead from that region had been going to the API account.
+
+`OracleLeadApiClient.resolve_owner()` now looks the name up before submitting
+and sends Oracle's own spelling. That query is case-insensitive, which is the
+whole reason this works: whatever the territory map says, and whatever a
+reviewer types into the Territory box, resolves to the one string Oracle will
+match. Results are cached per run, since a batch routes many leads to the same
+few reps, and retired resources are passed over via `EndDateActive`.
+
+A name Oracle does not know is still sent -- unchanged from the old behaviour,
+so a lookup outage cannot cost a submission -- but it now writes a warning onto
+the lead saying the owner will be ignored. **The wrong owner was never really
+the defect; the silence was.** A case-only correction is deliberately not
+warned about: it is the resolver working, and flagging it would put the same
+notice on every Nordic lead forever.
+
+Two things this does not do, both deliberate:
+
+- It does not send `OwnerId`. The integer party ID is immune to spelling
+  entirely and is the better field in principle, but `OwnerPartyName` is the
+  mechanism with 39 successful creates behind it on this tenant, and the
+  resolver removes the only way it was failing. `resolve_owner()` returns the
+  `party_id` alongside the name, so switching is a one-line change if a reason
+  appears.
+- It does not correct `territory_map.py` to `MARCUS JAMES`. The map is what
+  the dashboard displays, and every other rep is written in proper case there.
+  The translation to Oracle's spelling belongs at the boundary with Oracle,
+  not in the routing table -- and doing it at the boundary also covers the
+  hand-typed overrides, which never pass through the map at all.
+
 ### International leads
 
 `country_codes.py` holds the full ISO 3166-1 table plus the aliases leads
@@ -494,6 +624,14 @@ This local check is the one that holds. Oracle's own pre-submission dedup query
 only returns leads visible to the API user, and a lead Oracle has not yet
 assigned an owner to is invisible — including one this pipeline created
 moments earlier, which is exactly the lead most likely to be duplicated.
+
+**The guard's memory is as long as the retention policy** (2026-08-28). It
+matches against submitted leads still in the database, so once a submitted lead
+is purged at the one-year mark it stops guarding. The same person at the same
+company inquiring again 13 months later is submitted as a new lead rather than
+flagged as a duplicate. That is the intended reading — a re-inquiry after a
+year is a new inquiry — but it is a consequence of purging, not an accident,
+and lengthening `FINISHED_RETENTION_DAYS` lengthens the guard with it.
 
 ## Customer attachments
 
@@ -594,6 +732,112 @@ by a missing field, nothing reached Oracle, so the lead goes back to Pending
 Review with the reason attached — it is not a historical outcome, it is work to
 do. Look for it under Pending Review, on the notification bell, and on its own
 card, which keeps saying what to fix until it is fixed.
+
+### What each page is sorted by
+
+Pending Review and the Input Queue are in Outlook inbox order: the lead's own
+email, newest first. Those leads are still work, and the operator is matching
+them against a mailbox they are looking at in another window.
+
+**History is in the order leads finished, newest first** (2026-08-28). It was
+in inbox order too, and that made the page look unsorted: one approved batch
+carries emails spanning weeks or months, so the leads submitted together
+scattered themselves through the older ones and the lead that had just gone to
+Oracle was rarely near the top. The sort key is `submitted_at`, falling back to
+`reviewed_at` for a lead that was rejected rather than sent, and it is the
+column the page now shows — History previously displayed `reviewed_at`, which is
+stamped when a reviewer stages a lead, not when the batch it rides out with
+actually goes.
+
+`updated_at` is only a last resort in that key, and deliberately so: dismissing
+an alert or an `oracle_sync` write touches it, and sorting on it would jump a
+months-old lead back to the top of History the moment its bell was cleared.
+
+Both orders live in `db.LEAD_ORDERS`, and are applied in SQL rather than in
+Python — History is paginated, so a Python sort after `LIMIT`/`OFFSET` would
+order each page internally while still putting the wrong leads on page 1.
+
+## Retention
+
+The pipeline used to keep every lead it had ever seen. That is fine for a year
+and a problem after several: the rows are small, but each one anchors a cached
+email body, a saved `.msg` file and whatever the customer attached, and all of
+it is real personal data accumulating on one Windows machine.
+
+Two rules, in `retention.py` (2026-08-28):
+
+| Lead | Deleted |
+| :--- | :--- |
+| `rejected` | 30 days after it was rejected |
+| Any other finished lead (`submitted`, `duplicate`, `submission_unknown`) | 365 days after it finished |
+| Anything still in Pending Review or the Input Queue | **never** |
+
+Only `rejected` takes the short window. A `duplicate` is a real inquiry that
+matched an existing Oracle lead and a `submission_unknown` may have reached
+Oracle — neither is junk to clear out in a month.
+
+**Unfinished leads are never purged, at any age.** `lead_stages.py` exists to
+guarantee every lead has a way onward and a way back, and deleting one that
+nobody has dealt with yet is the most complete dead end available. A two-year-old
+lead sitting in the queue is a prompt to deal with it.
+
+Age is measured from when the lead *finished* — `db.FINISHED_AT_SQL`, the same
+key History sorts on — not from when its email arrived. The Sales inbox
+regularly turns up year-old threads, and ageing on email date would delete
+leads the operator had only just reviewed.
+
+Deletion is permanent and writes no backup file. It takes the lead row, its
+replies, its Oracle snapshot/opportunities/order lines, the source email once
+no surviving lead still points at it, and that email's cached body, `.msg` file
+and attachments off disk. A message shared by several leads (one trade-show
+spreadsheet becomes many) survives until its last lead does.
+
+### The stats survive the leads
+
+Every Oracle reporting table is keyed to `leads(id)` with a foreign key and
+`PRAGMA foreign_keys` is ON, so a purged lead takes its qualification, its
+opportunities and its revenue with it. Left alone, "All leads", all three
+conversion rates and the whole sales funnel would step down the first morning
+the retention job ran — and a rate computed over a denominator that shrinks as
+history is deleted is worse than no rate at all, because it still looks like a
+real number.
+
+So before anything is deleted, and **in the same transaction**, each lead's
+contribution to every count on the status page is added to `purged_lead_stats`:
+lead counts by status, message counts by status, the five Oracle funnel counts,
+and opportunity/order money by currency. `db.lifetime_lead_counts()`,
+`lifetime_message_counts()` and `lifetime_oracle_summary()` read live + purged,
+and the status page uses those. The rollup and the delete share a transaction
+because a crash between them would either lose the numbers forever or
+double-count them on the retry, and neither is detectable afterwards — the rows
+the count came from are exactly what is gone.
+
+That table holds counts and money only. No names, no addresses, no email: it
+has to survive a purge, so anything personal in it would defeat the purge.
+
+`count_leads()` stays live-only on purpose — History paginates on it, and a
+page count including deleted leads would offer empty pages.
+
+What cannot survive is the per-lead **Find a submitted lead** table on the
+status page: you cannot search a lead that has been deleted. The page says how
+many of the leads in its counts no longer exist, so the gap does not read as a
+bug in the search.
+
+### Running it
+
+```powershell
+py purge_old_leads.py            # dry run — says what would go, deletes nothing
+py purge_old_leads.py --apply    # delete it
+py purge_old_leads.py --apply --rejected-days 60 --finished-days 730
+```
+
+Dry run is the default, for the same reason `scratch_retire_leads.py` works
+that way: a delete you cannot undo should be something you asked for twice.
+`LeadPipeline_Retention` runs it daily with `--apply` at 07:00 — after the
+06:00 Oracle sync, so a lead's final qualification and conversion are banked
+into the rollup rather than yesterday's. Each run writes `logs/purge_*.log`
+saying which rule caught what; unattended runs have no console anyone is
+watching, and that log is the only record of what was deleted.
 
 ## State and recovery
 

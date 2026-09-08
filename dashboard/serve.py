@@ -101,12 +101,11 @@ def main():
         return 2
 
     if already_serving(host, port):
-        logger.error(
-            f'A dashboard is already answering on http://{host}:{port}; not '
-            'starting a second one. Stop the running dashboard first if you '
-            'meant to replace it.'
+        logger.info(
+            f'A dashboard is already answering on http://{host}:{port}; '
+            'keeping existing server running.'
         )
-        return 1
+        return 0
 
     logger.info(f'Dashboard starting on http://{host}:{port}  (log: {log_file})')
     try:

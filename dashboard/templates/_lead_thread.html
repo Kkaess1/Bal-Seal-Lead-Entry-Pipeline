@@ -20,6 +20,9 @@
     </span>
   </div>
 
+  {# Collapsed by default: an ingested reply chain is context a reviewer opens
+     when they need it, not something that should push the lead's own fields
+     off the screen on every card. #}
   <details class="thread-dropdown">
     <summary>View conversation{% if ingested_count > 1 %} &mdash; {{ ingested_count }} messages, oldest first{% endif %}</summary>
     <div class="thread-body-container">

@@ -258,6 +258,28 @@ def init_db(db_path=None):
             );
             CREATE INDEX IF NOT EXISTS idx_oracle_events_lead
                 ON oracle_lifecycle_events(lead_id, event_at);
+
+            -- What retention.py deleted, kept as counts so the numbers on the
+            -- status page do not fall as old leads are purged.
+            --
+            -- Every Oracle reporting table above is keyed to leads(id) with a
+            -- foreign key, and foreign keys are ON, so a purged lead takes its
+            -- snapshot, opportunities and order lines with it. Without this
+            -- table "All leads", the conversion rates and the sales funnel
+            -- would all quietly shrink each time the retention job ran, and a
+            -- rate computed over a shrinking denominator is worse than no rate
+            -- at all -- it looks like a real number.
+            --
+            -- Deliberately counts and money only. No names, no addresses, no
+            -- email: this table has to survive a purge, so anything personal
+            -- in it would defeat the purge.
+            CREATE TABLE IF NOT EXISTS purged_lead_stats (
+                metric     TEXT NOT NULL,
+                bucket     TEXT NOT NULL,
+                lead_count INTEGER NOT NULL DEFAULT 0,
+                amount     REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (metric, bucket)
+            );
         """)
         conn.execute('PRAGMA journal_mode = WAL')
         conn.commit()
@@ -819,13 +841,36 @@ def get_lead(lead_id, conn=None):
             conn.close()
 
 
-def list_leads(status=None, conn=None, limit=None, offset=0):
-    """
-    List leads, optionally filtered and paginated, in Outlook inbox order:
-    the most recently received email first.
+# How list_leads() may order its rows. Both end on l.id DESC so that leads
+# sharing a timestamp -- one ingest run, one submit run -- still come back in a
+# fixed order rather than whatever the query planner happens to produce.
+LEAD_ORDERS = {
+    # Outlook inbox order, for leads still being worked on.
+    'received': 'COALESCE(m.received_at, l.created_at) DESC, l.id DESC',
+    # The order leads finished in, for History. submitted_at is the moment the
+    # lead reached Oracle and reviewed_at the moment a reviewer decided it, so
+    # between them they cover every History status. updated_at is deliberately
+    # only a fallback: dismissing an alert or an oracle_sync write touches it,
+    # which would shuffle a finished lead back to the top months later.
+    'finished': ('COALESCE(l.submitted_at, l.reviewed_at, l.updated_at, '
+                 'l.created_at) DESC, l.id DESC'),
+}
 
-    Ordered on the lead's own message received_at, not created_at. created_at
-    is when the pipeline ingested the lead, and one ingest run sweeps up
+
+def list_leads(status=None, conn=None, limit=None, offset=0, order='received'):
+    """
+    List leads, optionally filtered and paginated. `order` is a key of
+    LEAD_ORDERS; the default puts the most recently received email first, the
+    way the Outlook inbox is ordered.
+
+    History passes order='finished' instead. Its leads are done, and the
+    question there is "what went out last?", not "what arrived last?" -- a
+    batch approved today is full of emails from a spread of dates, so inbox
+    order interleaved today's submissions with last month's and read as no
+    order at all.
+
+    'received' orders on the lead's own message received_at, not created_at.
+    created_at is when the pipeline ingested the lead, and one ingest run sweeps up
     several days of mail in a few seconds -- so ordering by it grouped the
     whole batch under one near-identical timestamp and left the emails inside
     it in whatever order they happened to be processed, which is not the order
@@ -853,7 +898,13 @@ def list_leads(status=None, conn=None, limit=None, offset=0):
             placeholders = ', '.join('?' for _ in statuses)
             sql += f' WHERE l.status IN ({placeholders})'
             params.extend(statuses)
-        sql += ' ORDER BY COALESCE(m.received_at, l.created_at) DESC, l.id DESC'
+        try:
+            sql += f' ORDER BY {LEAD_ORDERS[order]}'
+        except KeyError:
+            raise ValueError(
+                f'unknown lead order {order!r}; expected one of '
+                f"{', '.join(sorted(LEAD_ORDERS))}"
+            ) from None
         if limit is not None:
             sql += ' LIMIT ? OFFSET ?'
             params.extend((max(1, int(limit)), max(0, int(offset))))
@@ -1483,7 +1534,7 @@ def recall_approved_lead(lead_id, conn=None):
                SET status = 'pending_review', updated_at = ?,
                    reviewed_by = NULL, reviewed_at = NULL, review_notes = NULL,
                    submitting_started_at = NULL, next_attempt_at = NULL
-               WHERE id = ? AND status = 'approved'""",
+               WHERE id = ? AND status IN ('approved', 'failed')""",
             (_now(), lead_id),
         )
         if owns_conn:
@@ -2306,6 +2357,394 @@ def get_run_lease(key, conn=None):
         return json.loads(raw) if raw else None
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+
+# --------------------------------------------------------------------------
+# Retention: purging finished leads, and keeping their numbers
+# --------------------------------------------------------------------------
+# retention.py owns the policy (how old is too old). Everything below is the
+# SQL half of it, here because db.py is the only module that touches SQLite.
+#
+# The ordering key is the same one History sorts on -- see LEAD_ORDERS
+# ['finished']. A lead is aged from when it finished, not from when its email
+# arrived: a lead reviewed last week is a week old even if the email it came
+# from is a year old, and purging on email date would delete leads the
+# operator had only just dealt with.
+FINISHED_AT_SQL = 'COALESCE(submitted_at, reviewed_at, updated_at, created_at)'
+
+# Metric names in purged_lead_stats. Each is a family of buckets:
+#   PURGED_LEAD_STATUS      bucket = lead status        -> lead_count
+#   PURGED_MESSAGE_STATUS   bucket = message status     -> lead_count
+#   PURGED_ORACLE           bucket = summary key        -> lead_count
+#   PURGED_OPPORTUNITY      bucket = currency code      -> lead_count + amount
+#   PURGED_WON              bucket = currency code      -> amount
+#   PURGED_ORDER            bucket = currency code      -> amount
+PURGED_LEAD_STATUS = 'lead_status'
+PURGED_MESSAGE_STATUS = 'message_status'
+PURGED_ORACLE = 'oracle'
+PURGED_OPPORTUNITY = 'opportunity'
+PURGED_WON = 'opportunity_won'
+PURGED_ORDER = 'order_line'
+
+# The five counts oracle_dashboard_summary() reports. Rolled up with exactly
+# the same definitions -- if these two drift apart, the funnel starts telling
+# a different story about purged leads than about live ones.
+_ORACLE_ROLLUP_SQL = """
+    SELECT
+      (SELECT COUNT(*) FROM oracle_lead_snapshots
+         WHERE lead_id IN ({ids})
+           AND (oracle_status IS NOT NULL OR oracle_lead_number IS NOT NULL)) synced,
+      (SELECT COUNT(*) FROM oracle_lead_snapshots
+         WHERE lead_id IN ({ids})
+           AND (qualified_at IS NOT NULL
+                OR UPPER(COALESCE(oracle_status,'')) = 'QUALIFIED')) qualified,
+      (SELECT COUNT(*) FROM oracle_lead_snapshots s
+         WHERE s.lead_id IN ({ids})
+           AND (s.converted_at IS NOT NULL OR EXISTS (
+                SELECT 1 FROM oracle_opportunities o WHERE o.lead_id = s.lead_id
+           ))) converted,
+      (SELECT COUNT(DISTINCT lead_id) FROM oracle_opportunities
+         WHERE lead_id IN ({ids})
+           AND UPPER(COALESCE(status,'')) IN ('WON','CLOSED_WON','CLOSED WON')) won,
+      (SELECT COUNT(*) FROM oracle_lead_snapshots
+         WHERE lead_id IN ({ids}) AND sync_error IS NOT NULL) errors
+"""
+
+
+def leads_due_for_purge(rejected_before, finished_before, conn=None):
+    """
+    Finished leads old enough to delete, oldest first.
+
+    Two rules, and a lead matching either is due:
+      - a 'rejected' lead that finished before `rejected_before`
+      - any finished lead that finished before `finished_before`
+
+    Only lead_stages.HISTORY statuses are considered. A lead still in Pending
+    Review or the Input Queue is unfinished work no matter how old it is, and
+    deleting it would take away the "way onward and a way back" that
+    lead_stages.py exists to guarantee. An ancient lead sitting in the queue is
+    a prompt to deal with it, not something to quietly bin.
+    """
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        placeholders = ', '.join('?' for _ in lead_stages.HISTORY)
+        rows = conn.execute(
+            f"""SELECT id, status, message_id,
+                       {FINISHED_AT_SQL} AS finished_at,
+                       CASE WHEN status = 'rejected' AND {FINISHED_AT_SQL} < ?
+                            THEN 'rejected' ELSE 'aged' END AS rule
+                FROM leads
+                WHERE status IN ({placeholders})
+                  AND ((status = 'rejected' AND {FINISHED_AT_SQL} < ?)
+                       OR {FINISHED_AT_SQL} < ?)
+                ORDER BY finished_at, id""",
+            (rejected_before, *lead_stages.HISTORY, rejected_before, finished_before),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def purge_lead_file_paths(lead_ids, conn=None):
+    """
+    Every file on disk that belongs only to these leads, so the caller can
+    delete it once the rows are gone.
+
+    A message's cached body is only listed when no surviving lead still points
+    at that message: one trade-show spreadsheet email becomes many leads, and
+    deleting the cached body while a sibling lead is still in review would
+    empty that lead's email thread on the dashboard.
+    """
+    if not lead_ids:
+        return []
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        ids = ', '.join('?' for _ in lead_ids)
+        paths = [
+            row[0] for row in conn.execute(
+                f"""SELECT submit_screenshot_path FROM leads
+                    WHERE id IN ({ids}) AND submit_screenshot_path IS NOT NULL""",
+                list(lead_ids),
+            )
+        ]
+        for row in conn.execute(
+            f"""SELECT body_cache_path, translated_body_cache_path,
+                       message_file_path, attachments
+                FROM messages
+                WHERE id IN (SELECT message_id FROM leads
+                             WHERE id IN ({ids}) AND message_id IS NOT NULL)
+                  AND NOT EXISTS (SELECT 1 FROM leads survivor
+                                  WHERE survivor.message_id = messages.id
+                                    AND survivor.id NOT IN ({ids}))""",
+            list(lead_ids) * 2,
+        ):
+            paths.extend(row[0:3])
+            # Attachments are stored as JSON metadata; each entry may name a
+            # saved copy of the customer's file. Tolerates a legacy or
+            # malformed value rather than aborting a purge over it.
+            try:
+                for attachment in json.loads(row['attachments'] or '[]'):
+                    if isinstance(attachment, dict):
+                        paths.append(attachment.get('saved_path')
+                                     or attachment.get('path'))
+            except (TypeError, ValueError):
+                pass
+        return [p for p in paths if p]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def purge_leads(lead_ids, conn=None):
+    """
+    Delete these leads and everything hanging off them, after adding their
+    numbers to purged_lead_stats.
+
+    The rollup happens first and in the same transaction as the delete. If the
+    two were separate, a crash between them would either lose the numbers
+    forever (delete first) or double-count them on the retry (roll up first,
+    separately) -- and there is no way to detect either afterwards, because the
+    rows the count was derived from are exactly what is gone.
+
+    Returns a summary dict of what was removed.
+    """
+    if not lead_ids:
+        return {'leads': 0, 'messages': 0, 'by_status': {}}
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        lead_ids = [int(i) for i in lead_ids]
+        ids = ', '.join('?' for _ in lead_ids)
+
+        by_status = {
+            row['status']: row['count'] for row in conn.execute(
+                f"""SELECT status, COUNT(*) AS count FROM leads
+                    WHERE id IN ({ids}) GROUP BY status""", lead_ids)
+        }
+        oracle = dict(conn.execute(
+            _ORACLE_ROLLUP_SQL.format(ids=ids), lead_ids * 5).fetchone())
+        opportunities = conn.execute(
+            f"""SELECT COALESCE(currency_code, 'Unknown') currency,
+                       COUNT(*) opportunity_count,
+                       SUM(COALESCE(revenue_amount, 0)) pipeline_value,
+                       SUM(CASE WHEN UPPER(COALESCE(status,'')) IN
+                            ('WON','CLOSED_WON','CLOSED WON')
+                           THEN COALESCE(revenue_amount,0) ELSE 0 END) won_value
+                FROM oracle_opportunities WHERE lead_id IN ({ids})
+                GROUP BY COALESCE(currency_code, 'Unknown')""", lead_ids).fetchall()
+        order_lines = conn.execute(
+            f"""SELECT COALESCE(currency_code, 'Unknown') currency,
+                       SUM(COALESCE(net_amount, 0)) order_value
+                FROM oracle_order_lines
+                WHERE lead_id IN ({ids})
+                  AND order_number IS NOT NULL AND order_number != ''
+                GROUP BY COALESCE(currency_code, 'Unknown')""", lead_ids).fetchall()
+        # Messages that will be orphaned by this delete -- counted here, while
+        # the leads that keep them alive still exist.
+        orphan_messages = [
+            row['id'] for row in conn.execute(
+                f"""SELECT id FROM messages
+                    WHERE id IN (SELECT message_id FROM leads
+                                 WHERE id IN ({ids}) AND message_id IS NOT NULL)
+                      AND NOT EXISTS (SELECT 1 FROM leads survivor
+                                      WHERE survivor.message_id = messages.id
+                                        AND survivor.id NOT IN ({ids}))""",
+                lead_ids * 2)
+        ]
+        message_statuses = {}
+        if orphan_messages:
+            message_ids = ', '.join('?' for _ in orphan_messages)
+            message_statuses = {
+                row['status']: row['count'] for row in conn.execute(
+                    f"""SELECT status, COUNT(*) AS count FROM messages
+                        WHERE id IN ({message_ids}) GROUP BY status""",
+                    orphan_messages)
+            }
+
+        _add_purged_stats(conn, PURGED_LEAD_STATUS,
+                          {k: {'lead_count': v} for k, v in by_status.items()})
+        _add_purged_stats(conn, PURGED_MESSAGE_STATUS,
+                          {k: {'lead_count': v} for k, v in message_statuses.items()})
+        _add_purged_stats(conn, PURGED_ORACLE,
+                          {k: {'lead_count': v} for k, v in oracle.items() if v})
+        _add_purged_stats(conn, PURGED_OPPORTUNITY, {
+            row['currency']: {'lead_count': row['opportunity_count'],
+                              'amount': row['pipeline_value'] or 0}
+            for row in opportunities})
+        _add_purged_stats(conn, PURGED_WON, {
+            row['currency']: {'amount': row['won_value'] or 0}
+            for row in opportunities})
+        _add_purged_stats(conn, PURGED_ORDER, {
+            row['currency']: {'amount': row['order_value'] or 0}
+            for row in order_lines})
+
+        # Children first: foreign keys are ON, so the lead delete is refused
+        # while any of these still point at it.
+        for table in ('oracle_lifecycle_events', 'oracle_order_lines',
+                      'oracle_opportunities', 'oracle_lead_snapshots',
+                      'lead_replies', 'outlook_actions'):
+            conn.execute(f'DELETE FROM {table} WHERE lead_id IN ({ids})', lead_ids)
+        # A surviving lead may be marked as a duplicate OF one being purged.
+        # Clearing the pointer keeps that lead, and its "duplicate of" note is
+        # already in field_warnings -- the alternative is either a foreign key
+        # error or purging a lead that is not due.
+        conn.execute(
+            f'UPDATE leads SET duplicate_of_lead_id = NULL '
+            f'WHERE duplicate_of_lead_id IN ({ids}) AND id NOT IN ({ids})',
+            lead_ids * 2)
+        conn.execute(f'DELETE FROM leads WHERE id IN ({ids})', lead_ids)
+
+        if orphan_messages:
+            message_ids = ', '.join('?' for _ in orphan_messages)
+            conn.execute(
+                f'DELETE FROM messages WHERE id IN ({message_ids})', orphan_messages)
+        # Conversation context nothing references any more. thread_messages is
+        # keyed by conversation, not by lead, so it can only be cleaned up once
+        # the last message of its conversation has gone.
+        conn.execute(
+            """DELETE FROM thread_messages
+               WHERE conversation_id IS NOT NULL
+                 AND NOT EXISTS (SELECT 1 FROM messages
+                                 WHERE messages.conversation_id
+                                       = thread_messages.conversation_id)""")
+
+        if owns_conn:
+            conn.commit()
+        return {
+            'leads': sum(by_status.values()),
+            'messages': len(orphan_messages),
+            'by_status': by_status,
+        }
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def _add_purged_stats(conn, metric, buckets):
+    """Add to a metric's running totals. Never overwrites: every purge run
+    adds to what earlier runs already counted."""
+    for bucket, values in buckets.items():
+        conn.execute(
+            """INSERT INTO purged_lead_stats (metric, bucket, lead_count, amount)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(metric, bucket) DO UPDATE SET
+                   lead_count = lead_count + excluded.lead_count,
+                   amount = amount + excluded.amount""",
+            (metric, str(bucket), int(values.get('lead_count', 0) or 0),
+             float(values.get('amount', 0) or 0)),
+        )
+
+
+def purged_stats(conn=None):
+    """Everything purged so far, as {metric: {bucket: {count, amount}}}."""
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        stats = {}
+        for row in conn.execute('SELECT * FROM purged_lead_stats'):
+            stats.setdefault(row['metric'], {})[row['bucket']] = {
+                'count': row['lead_count'], 'amount': row['amount'],
+            }
+        return stats
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def lifetime_lead_counts(conn=None):
+    """
+    Lead counts per status over the life of the pipeline: the leads still in
+    the database plus the ones retention has since deleted.
+
+    count_leads() stays live-only on purpose -- History paginates on it, and a
+    page count that included deleted leads would offer pages with nothing on
+    them. This is for the status page, where the question is "how many leads
+    has this pipeline handled", and the honest answer does not drop by 200 the
+    morning the retention job first runs.
+    """
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        counts = {
+            row['status']: row['count'] for row in conn.execute(
+                'SELECT status, COUNT(*) AS count FROM leads GROUP BY status')
+        }
+        for bucket, values in purged_stats(conn=conn).get(
+                PURGED_LEAD_STATUS, {}).items():
+            counts[bucket] = counts.get(bucket, 0) + values['count']
+        return counts
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def lifetime_message_counts(conn=None):
+    """Message counts per status, including messages deleted with their leads."""
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        counts = dict(count_messages_by_status(conn=conn))
+        for bucket, values in purged_stats(conn=conn).get(
+                PURGED_MESSAGE_STATUS, {}).items():
+            counts[bucket] = counts.get(bucket, 0) + values['count']
+        return counts
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def lifetime_oracle_summary(conn=None):
+    """
+    oracle_dashboard_summary() plus the Oracle outcomes of purged leads.
+
+    Same shape as the live summary, so the funnel and the rate cards read from
+    one thing either way. A purged lead's Oracle record still exists in Oracle
+    -- deleting our copy of it is a local retention decision, and it should not
+    look as though the lead was never qualified.
+    """
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        summary = oracle_dashboard_summary(conn=conn)
+        purged = purged_stats(conn=conn)
+        for key, values in purged.get(PURGED_ORACLE, {}).items():
+            if key in summary:
+                summary[key] = summary[key] + values['count']
+
+        won_by_currency = purged.get(PURGED_WON, {})
+        summary['currencies'] = _merge_currency_rows(
+            summary['currencies'], 'currency',
+            {currency: {
+                'pipeline_value': values['amount'],
+                'won_value': won_by_currency.get(currency, {}).get('amount', 0),
+             } for currency, values in purged.get(PURGED_OPPORTUNITY, {}).items()},
+        )
+        summary['order_currencies'] = _merge_currency_rows(
+            summary['order_currencies'], 'currency',
+            {currency: {'order_value': values['amount']}
+             for currency, values in purged.get(PURGED_ORDER, {}).items()},
+        )
+        return summary
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def _merge_currency_rows(live_rows, key, purged_by_currency):
+    """Add purged money into the live per-currency rows, keeping them sorted.
+
+    A currency can appear in either side alone: the last EUR lead may have been
+    purged months ago, or the first one may have arrived this morning."""
+    merged = {row[key]: dict(row) for row in live_rows}
+    for currency, amounts in purged_by_currency.items():
+        row = merged.setdefault(currency, {key: currency})
+        for field, amount in amounts.items():
+            row[field] = (row.get(field) or 0) + (amount or 0)
+    return [merged[currency] for currency in sorted(merged)]
 
 
 if __name__ == '__main__':

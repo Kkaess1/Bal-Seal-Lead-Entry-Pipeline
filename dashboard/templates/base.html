@@ -984,12 +984,22 @@
       border-radius: var(--r-md); overflow: hidden;
     }
     .thread-dropdown > summary {
+      display: flex; align-items: center; gap: var(--s-2);
       padding: var(--s-3); font-weight: 500; font-size: var(--fs-sm);
       cursor: pointer; user-select: none;
       background: var(--surface); color: var(--text); list-style: none;
       transition: background-color var(--t-micro) var(--ease-out);
     }
     .thread-dropdown > summary::-webkit-details-marker { display: none; }
+    /* The thread starts collapsed, so the summary is the only thing saying it
+       opens at all -- the native marker is suppressed above. Same caret and
+       rotation as .queue-details, for the same reason given there. */
+    .thread-dropdown > summary::before {
+      content: '›'; display: inline-block; flex: none;
+      font-size: 1.1em; line-height: 1; color: var(--text-muted);
+      transition: transform var(--t-state) var(--ease-out-quart);
+    }
+    .thread-dropdown[open] > summary::before { transform: rotate(90deg); }
     .thread-dropdown > summary:hover { background: var(--tint-hover); }
     .thread-body-container {
       padding: var(--s-3); display: flex; flex-direction: column; gap: var(--s-4);

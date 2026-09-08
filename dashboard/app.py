@@ -29,7 +29,11 @@ import db  # noqa: E402
 import email_cleaner  # noqa: E402
 import hq_lookup  # noqa: E402
 import lead_stages  # noqa: E402
+# Aliased: `manual_lead` is also the natural name for a lead variable in
+# the routes below, and shadowing the module there would be a live bug.
+import manual_lead as manual_lead_module  # noqa: E402
 import outlook_ingest  # noqa: E402
+import retention  # noqa: E402
 import review_marking  # noqa: E402
 import secrets_store  # noqa: E402
 import territory_map  # noqa: E402
@@ -65,6 +69,7 @@ ATTACHMENT_CACHE_DIR = Path(__file__).resolve().parent.parent / 'email_attachmen
 # calls and a confusing log, so a second click inside this window is turned
 # away rather than started.
 _INGEST_JOB_KEY = 'job:manual_ingest'
+_ORACLE_SYNC_JOB_KEY = 'job:manual_oracle_sync'
 
 # What the Reference tab will render, by extension. Everything else in the
 # folder is listed with a download link but never served inline.
@@ -397,6 +402,22 @@ def _format_timestamp(raw):
         return str(raw)
 
 
+def _finished_at(lead):
+    """
+    When a History lead finished, mirroring db.LEAD_ORDERS['finished'].
+
+    The column History sorts on has to be the column History shows, or the
+    order looks arbitrary to the person reading it. Kept in step with the SQL
+    by tests/test_review_order.py, which asserts the rendered dates descend.
+    """
+    return (
+        lead.get('submitted_at')
+        or lead.get('reviewed_at')
+        or lead.get('updated_at')
+        or lead.get('created_at')
+    )
+
+
 # How long a lead may sit claimed by a submit run before the queue offers a
 # way out of it. A real submission takes seconds; anything past this means the
 # run that claimed it is gone. Well under db.release_stale_submission_claims()'s
@@ -460,6 +481,11 @@ def _decorate(lead):
     if lead.get('lead_details'):
         cleaned = email_cleaner.clean_email_body(lead['lead_details'])
         lead['details_flat'] = email_cleaner.condense_paragraphs(cleaned) if cleaned else None
+    # Reply, Forward and Delete all act on an Outlook message. A lead entered
+    # by hand (manual_lead.py) has none, so those buttons are not offered on
+    # it -- every one of them would fail, and two of them say "email" in the
+    # confirmation dialog for an email that does not exist.
+    lead['has_source_email'] = bool(lead.get('message_id'))
     lead['email_thread'] = db.get_lead_email_thread(lead['id'])
     lead['has_followup'] = len(lead['email_thread']) > 1
     # Each message is stamped with when it arrived: the thread is read top to
@@ -506,6 +532,17 @@ def _decorate(lead):
     lead['recipients_known'] = stored_recipients is not None
     lead['other_recipients'] = _other_recipients(stored_recipients)
     lead['other_recipients_label'] = _recipients_label(lead['other_recipients'])
+
+    if lead['other_recipients_label']:
+        lead['recipients_display'] = lead['other_recipients_label']
+    elif lead['recipients_known']:
+        lead['recipients_display'] = 'None (Sales inbox only)'
+    elif lead.get('source') == 'email_excel_attachment':
+        lead['recipients_display'] = 'N/A (Spreadsheet upload)'
+    elif lead.get('source') == manual_lead_module.SOURCE:
+        lead['recipients_display'] = 'N/A (Entered by hand)'
+    else:
+        lead['recipients_display'] = 'Not recorded'
 
     # Everyone a reply could go to, for the dialog's tick-list. The person
     # being replied to is ticked; everyone else starts off, because answering
@@ -570,7 +607,7 @@ _ROUTING_INPUT_FIELDS = {'state', 'zip', 'country'}
 def _refresh_territory_assignment(current, edited):
     """Keep owner and routing explanation synchronized with form edits.
 
-    The Territory Manager text box is still available for exceptional manual
+    The Territory Manager dropdown is available for exceptional manual
     assignments. A changed value is an explicit override; otherwise any
     geography change recalculates both the manager and its explanation.
     """
@@ -862,6 +899,81 @@ def ingest_now():
     return redirect(url_for('index'))
 
 
+@app.route('/leads/new')
+def new_lead():
+    """The form for entering a lead that never arrived as an email."""
+    return render_template('manual_lead.html',
+                           max_images=manual_lead_module.MAX_IMAGES,
+                           ai_available=bool(secrets_store.get_secret('OPENAI_API_KEY')
+                                             or secrets_store.get_secret('CHATGPT_API')))
+
+
+@app.route('/leads/new', methods=['POST'])
+def create_lead():
+    """
+    Read what was pasted or attached, and put the lead on Pending Review.
+
+    Synchronous, unlike ingest_now(): that starts a detached run over a whole
+    mailbox, this is one model call about one lead and the operator is sitting
+    in front of it waiting for the answer. Landing back on Pending Review with
+    the new card at the top -- rather than on a preview page of its own -- is
+    the point of the feature: from there the lead is reviewed, edited and
+    approved through exactly the same controls as an ingested one.
+    """
+    text = (request.form.get('notes') or '').strip()
+
+    images, rejected = [], []
+    for upload in request.files.getlist('screenshot'):
+        if not upload or not upload.filename:
+            continue
+        if len(images) >= manual_lead_module.MAX_IMAGES:
+            rejected.append(upload.filename)
+            continue
+        # The browser's declared type is not trusted to be an image on its own
+        # merits -- it is checked so an unreadable upload fails here with a
+        # sentence, rather than as an opaque error from the API.
+        mime_type = (upload.mimetype or '').lower()
+        if mime_type not in manual_lead_module.ACCEPTED_IMAGE_TYPES:
+            rejected.append(upload.filename)
+            continue
+        raw = upload.read()
+        if not raw or len(raw) > manual_lead_module.MAX_IMAGE_BYTES:
+            rejected.append(upload.filename)
+            continue
+        images.append((mime_type, raw))
+
+    if not text and not images:
+        flash('Paste some details or attach a screenshot first.', 'manual_error')
+        return redirect(url_for('new_lead'))
+
+    try:
+        lead_id, extraction = manual_lead_module.create_lead_from_notes(
+            text, images=images, reviewed_by='dashboard',
+        )
+    except Exception:
+        app.logger.exception('Could not create a lead from pasted notes')
+        flash('Could not create the lead. Check the dashboard log.', 'manual_error')
+        return redirect(url_for('new_lead'))
+
+    found = len(extraction.get('fields') or {})
+    message = (
+        f'Lead created from {"a screenshot" if images and not text else "your notes"}'
+        f' — {found} field{"" if found == 1 else "s"} read. Check it below before approving.'
+        if found else
+        'Lead created, but nothing could be read from it automatically. '
+        'Open it and fill the fields in by hand.'
+    )
+    if rejected:
+        message += (
+            f' {len(rejected)} attachment(s) were skipped — screenshots must be '
+            f'a PNG, JPEG, GIF, WebP or BMP under '
+            f'{manual_lead_module.MAX_IMAGE_BYTES // (1024 * 1024)} MB, '
+            f'and at most {manual_lead_module.MAX_IMAGES} at a time.'
+        )
+    flash(message, 'manual_success' if found else 'manual_error')
+    return redirect(url_for('index', _anchor=f'lead-card-{lead_id}'))
+
+
 @app.route('/queue')
 def queue():
     # Same order as Pending Review, by the email's own date rather than when
@@ -981,12 +1093,15 @@ def queue_submit_now():
     hit a network error is put back to 'approved' with a retry time, and
     without this it would wait for the next batch approval to be picked up.
     """
-    # The same gate queue_approve_all() runs, for the same reason: a lead that
-    # Oracle would refuse belongs on Pending Review where the missing field can
-    # be typed in, not parked under "Approved for Oracle" waiting for a run
-    # that will only bounce it. Checked here too because this button acts on
-    # leads that are *already* approved -- including any that reached that
-    # state before this check existed, or came back via schedule_lead_retry().
+    # Reset any failed queue leads back to 'approved' so they are picked up for resubmission
+    failed_leads = db.list_leads(status='failed')
+    for lead in failed_leads:
+        db.update_lead_fields(lead['id'], {
+            'status': 'approved',
+            'submitting_started_at': None,
+            'next_attempt_at': None,
+        })
+
     held_back = _hold_back_unsendable(db.list_leads(status='approved'))
 
     waiting = db.count_leads('approved')
@@ -1058,7 +1173,8 @@ def lead_detail(lead_id):
         duplicate_of = db.get_lead(lead['duplicate_of_lead_id'])
     return render_template('lead_detail.html', lead=lead, duplicate_of=duplicate_of,
                             schema_fields=db.LEAD_SCHEMA_FIELDS,
-                            field_groups=LEAD_FIELD_GROUPS)
+                            field_groups=LEAD_FIELD_GROUPS,
+                            territory_managers=territory_map.TERRITORY_MANAGERS)
 
 
 @app.route('/leads/<int:lead_id>/save', methods=['POST'])
@@ -1068,6 +1184,10 @@ def save_lead(lead_id):
         abort(404)
     if lead['status'] not in lead_stages.EDITABLE:
         abort(409, 'This lead is no longer editable')
+    posted_tm = request.form.get('assigned_tm')
+    if (posted_tm and
+            posted_tm not in territory_map.TERRITORY_MANAGERS):
+        abort(400, 'Invalid Territory Manager')
     edited = {}
     for field in db.LEAD_SCHEMA_FIELDS:
         if field in request.form:
@@ -1636,10 +1756,20 @@ def history():
     total = db.count_leads(status=statuses)
     pages = max(1, (total + per_page - 1) // per_page)
     page = min(page, pages)
+    # order='finished', not the inbox order the other two pages use: these
+    # leads are done, and the newest thing here is the one that just went to
+    # Oracle. Ordering History by email date meant a batch submitted this
+    # morning scattered itself through months of older leads, so the page read
+    # as unordered. See db.LEAD_ORDERS.
     leads = db.list_leads(
         status=statuses, limit=per_page, offset=(page - 1) * per_page,
+        order='finished',
     )
     leads = [_decorate(l) for l in leads]
+    for lead in leads:
+        # Rendered the way the Reviewed column it replaces was -- a trimmed
+        # ISO stamp -- so the fixed-width column still fits it.
+        lead['finished_at'] = (_finished_at(lead) or '')[:16].replace('T', ' ')
     return render_template(
         'history.html', leads=leads, total=total, page=page, pages=pages,
     )
@@ -1842,11 +1972,22 @@ def reference_delete():
 
 
 @app.errorhandler(RequestEntityTooLarge)
-def reference_upload_too_large(error):
+def upload_too_large(error):
     """A too-large upload should say so on the page it came from, rather than
-    dropping the operator onto a bare 413."""
+    dropping the operator onto a bare 413.
+
+    MAX_CONTENT_LENGTH caps every request body, so two pages can raise this:
+    the Reference tab and the screenshot box on Create Lead. Answering both
+    from the reference page sent an operator who had just attached a large
+    screenshot to a tab about territory maps, carrying a flash category that
+    page does not render -- so the error vanished and the lead simply never
+    appeared."""
     limit_mb = MAX_REFERENCE_UPLOAD_BYTES // (1024 * 1024)
-    flash(f'That file is too large — the limit is {limit_mb} MB.', 'reference_error')
+    message = f'That file is too large — the limit is {limit_mb} MB.'
+    if (request.endpoint or '') == 'create_lead':
+        flash(message, 'manual_error')
+        return redirect(url_for('new_lead'))
+    flash(message, 'reference_error')
     return redirect(url_for('reference'))
 
 
@@ -1893,6 +2034,27 @@ def reference_file(relpath):
     return response
 
 
+def _calculate_days_to_qualify(created_at, qualified_at):
+    if not qualified_at or not created_at:
+        return None
+    try:
+        def parse_ts(ts):
+            ts = str(ts).strip().replace('Z', '+00:00')
+            if 'T' in ts:
+                return datetime.fromisoformat(ts)
+            elif ' ' in ts:
+                return datetime.fromisoformat(ts.replace(' ', 'T'))
+            else:
+                return datetime.fromisoformat(ts + 'T00:00:00')
+
+        c_dt = parse_ts(created_at)
+        q_dt = parse_ts(qualified_at)
+        days = (q_dt.date() - c_dt.date()).days
+        return max(0, days)
+    except Exception:
+        return None
+
+
 @app.route('/status')
 def status():
     keys = [
@@ -1903,27 +2065,103 @@ def status():
         'oracle_order_lines_status',
     ]
     state = {k: db.get_run_state(k) for k in keys}
-    counts = {}
-    for s in db.LEAD_STATUSES:
-        counts[s] = db.count_leads(status=s)
+    # Lifetime figures, not live row counts: retention.py deletes finished
+    # leads once they are old enough, and every count on this page would step
+    # down each time it ran. A conversion rate over a denominator that shrinks
+    # as history is purged is worse than no rate -- it still looks like a real
+    # number. db.lifetime_* adds what was deleted back in from
+    # purged_lead_stats, which holds counts and money only, never names.
+    lifetime_counts = db.lifetime_lead_counts()
+    counts = {s: lifetime_counts.get(s, 0) for s in db.LEAD_STATUSES}
     query = request.args.get('q', '').strip()
     outcome = request.args.get('outcome', 'all').strip().lower()
     if outcome not in ('all', 'qualified', 'converted'):
         outcome = 'all'
-    oracle_summary = db.oracle_dashboard_summary()
+    oracle_summary = db.lifetime_oracle_summary()
     local_summary = {
-        'total': db.count_leads(),
-        'approved': db.count_leads(status=('review_approved', 'approved', 'submitted')),
-        'rejected': db.count_leads(status='rejected'),
-        'submitted': db.count_leads(status='submitted'),
+        'total': sum(lifetime_counts.values()),
+        'approved': sum(lifetime_counts.get(s, 0)
+                        for s in ('review_approved', 'approved', 'submitted')),
+        'rejected': lifetime_counts.get('rejected', 0),
+        'submitted': lifetime_counts.get('submitted', 0),
     }
+    # How many of those the database no longer holds. The per-lead table below
+    # can only list leads that still exist, so the page says so rather than
+    # letting the difference between the funnel and the list read as a bug.
+    purged_total = sum(
+        bucket['count'] for bucket
+        in db.purged_stats().get(db.PURGED_LEAD_STATUS, {}).values()
+    )
+    submitted = local_summary.get('submitted', 0)
+    total = local_summary.get('total', 0)
+    synced = oracle_summary.get('synced', 0)
+    qualified = oracle_summary.get('qualified', 0)
+    converted = oracle_summary.get('converted', 0)
+
+    conversion_rates = {
+        'qualification_rate': round((qualified / submitted * 100), 1) if submitted > 0 else 0.0,
+        'conversion_rate': round((converted / submitted * 100), 1) if submitted > 0 else 0.0,
+        'end_to_end_rate': round((converted / total * 100), 1) if total > 0 else 0.0,
+        'synced_rate': round((synced / submitted * 100), 1) if submitted > 0 else 0.0,
+    }
+    outcomes = db.search_lead_outcomes(query=query, outcome=outcome)
+    for item in outcomes:
+        item['days_to_qualify'] = _calculate_days_to_qualify(item.get('created_at'), item.get('qualified_at'))
+
     return render_template(
         'status.html', state=state, counts=counts,
-        message_counts=db.count_messages_by_status(),
+        message_counts=db.lifetime_message_counts(),
         local_summary=local_summary, oracle_summary=oracle_summary,
-        outcomes=db.search_lead_outcomes(query=query, outcome=outcome),
+        conversion_rates=conversion_rates,
+        outcomes=outcomes, purged_total=purged_total,
+        retention_rejected_days=retention.REJECTED_RETENTION_DAYS,
+        retention_finished_days=retention.FINISHED_RETENTION_DAYS,
         query=query, outcome=outcome,
     )
+
+
+def _start_oracle_sync_run(lease_token=None):
+    """Start an Oracle outcome sync run in the background."""
+    import subprocess
+    try:
+        child_env = os.environ.copy()
+        if lease_token:
+            child_env['PIPELINE_ORACLE_SYNC_LEASE_TOKEN'] = lease_token
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve().parent.parent / 'oracle_sync.py')],
+            cwd=str(Path(__file__).resolve().parent.parent), env=child_env,
+        )
+        return True
+    except OSError:
+        if lease_token:
+            db.update_run_lease(_ORACLE_SYNC_JOB_KEY, lease_token, 'failed', 'Process could not start')
+        app.logger.exception('Could not start a manual Oracle outcome sync run')
+        return False
+
+
+@app.route('/status/sync', methods=['POST'])
+def trigger_oracle_sync():
+    """Trigger an on-demand background read-only sync of lead outcomes from Oracle."""
+    lease_token = db.acquire_run_lease(_ORACLE_SYNC_JOB_KEY, stale_minutes=30)
+    if not lease_token:
+        message = 'An Oracle sync is already in progress. New outcomes will appear automatically.'
+        if _wants_json():
+            return {'ok': False, 'error': message}
+        flash(message, 'oracle_sync_notice')
+        return redirect(url_for('status'))
+
+    if not _start_oracle_sync_run(lease_token):
+        message = 'Could not start Oracle outcome sync. Check the dashboard log.'
+        if _wants_json():
+            return {'ok': False, 'error': message}
+        flash(message, 'oracle_sync_error')
+        return redirect(url_for('status'))
+
+    message = 'Started Oracle outcome sync in the background. Outcomes will refresh automatically.'
+    if _wants_json():
+        return {'ok': True, 'message': message}
+    flash(message, 'oracle_sync_success')
+    return redirect(url_for('status'))
 
 
 @app.route('/status/leads/<int:lead_id>')

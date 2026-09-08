@@ -32,15 +32,15 @@ PENDING = INGESTING + ('pending_review',)
 # Staged by a reviewer, waiting for the batch to be confirmed.
 STAGED = ('review_approved',)
 # Confirmed and on their way to Oracle. 'submitting' is held only while a
-# submit run has the lead claimed; a run that dies leaves it there, which is
-# why the queue offers a way out of it (see dashboard/app.py check_oracle).
-SENDING = ('approved', 'submitting')
+# submit run has the lead claimed; 'failed' keeps failed attempts in the
+# Input Queue with error signage so the user can fix/retry without going to History.
+SENDING = ('approved', 'submitting', 'failed')
 QUEUE = STAGED + SENDING
 
 # --- History --------------------------------------------------------------
 # Finished, one way or another. Everything here is over unless a human sends
 # it back.
-HISTORY = ('submitted', 'failed', 'rejected', 'duplicate', 'submission_unknown')
+HISTORY = ('submitted', 'rejected', 'duplicate', 'submission_unknown')
 
 ALL = PENDING + QUEUE + HISTORY
 
@@ -54,19 +54,11 @@ PAGE_OF = dict(
 # is absent on purpose -- the lead is in Oracle, and returning it here would
 # invite a second copy. 'submission_unknown' has its own two answers (confirm
 # or retry) because Oracle may or may not hold a record for it.
-RETURNABLE = ('rejected', 'failed', 'duplicate')
+RETURNABLE = ('rejected', 'duplicate')
 
 # Statuses a reviewer can pull back out of the Input Queue to Pending Review.
-# 'approved' only: nothing has been sent, so there is no Oracle record to
-# reconcile and the lead is safe to take back. 'submitting' is deliberately
-# absent -- a run has claimed that lead and may be mid-POST, so its way out is
-# check_oracle, which asks what happened before deciding anything.
-#
-# Without this an approved lead that Oracle would refuse -- no Territory
-# Manager, most often -- had no route back to an editable state at all: not on
-# Pending Review, not editable on its own page, and not stuck enough for
-# check_oracle. See db.recall_approved_lead().
-RECALLABLE = ('approved',)
+# 'approved' and 'failed' allow pulling a lead back to Pending Review for edits.
+RECALLABLE = ('approved', 'failed')
 
 # Statuses whose fields a reviewer may still edit.
 EDITABLE = PENDING + STAGED

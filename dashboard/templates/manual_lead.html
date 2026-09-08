@@ -1,0 +1,139 @@
+{% extends 'base.html' %}
+{% block title %}Create Lead{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('index') }}">&larr; back to pending review</a></p>
+
+  <div class="page-head">
+    <h2>Create a lead</h2>
+  </div>
+
+  {% for message in get_flashed_messages(category_filter=['manual_error']) %}
+    <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
+  {% endfor %}
+
+  <div class="card">
+    {% if not ai_available %}
+      {# Said before the operator types a page of notes and finds out after. #}
+      <div class="submit-error-notice" role="alert">
+        <strong>No OpenAI key is configured.</strong>
+        The lead will still be created and whatever you paste is kept as its
+        details, but the fields will not be filled in for you — you will have
+        to enter them on the review form.
+      </div>
+    {% endif %}
+
+    <p class="meta" style="margin-top: 0;">
+      For a lead that did not arrive as an email — a phone call, a business
+      card, a form someone filled in while you watched. Paste whatever you
+      have and the fields are read out of it; you review and approve it on
+      Pending Review exactly like any other lead.
+    </p>
+
+    <form method="post" action="{{ url_for('create_lead') }}"
+          enctype="multipart/form-data" id="manual-lead-form">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+      <fieldset class="edit-section">
+        <legend>Paste the details</legend>
+        <label class="edit-field edit-field-wide">
+          <span>Notes</span>
+          <textarea name="notes" id="manual-notes" rows="12"
+                    style="min-height: 220px;"
+                    placeholder="Paste an email, a web form, your notes from a call — anything. Names, company, phone, email and location are picked out of it automatically."></textarea>
+        </label>
+      </fieldset>
+
+      <fieldset class="edit-section">
+        <legend>Or attach a screenshot</legend>
+        <label class="edit-field edit-field-wide">
+          <span>Screenshots <span class="label-optional">(optional, up to {{ max_images }})</span></span>
+          <input type="file" name="screenshot" id="manual-screenshot"
+                 accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" multiple>
+        </label>
+        <p class="meta" style="margin: 0.35rem 0 0;">
+          You can also paste an image straight into the notes box above with
+          Ctrl+V — a clipboard that carries text pastes as text, so only a
+          picture on its own is attached. Screenshots are read once to fill in the fields and are not
+          stored — the text read out of them is kept on the lead.
+        </p>
+        <p class="meta" id="manual-attached" style="margin: 0.35rem 0 0;" hidden></p>
+      </fieldset>
+
+      <div class="actions" style="margin-top: 1.5rem;">
+        <button type="submit" class="btn-approve btn-lg" id="manual-submit">Read it and create the lead</button>
+        <a class="btn btn-secondary" href="{{ url_for('index') }}">Cancel</a>
+      </div>
+      <p class="meta" style="margin-top: 0.5rem;">
+        Takes a few seconds while the notes are read.
+      </p>
+    </form>
+  </div>
+
+  <script>
+    (function() {
+      var form = document.getElementById('manual-lead-form');
+      var notes = document.getElementById('manual-notes');
+      var picker = document.getElementById('manual-screenshot');
+      var attached = document.getElementById('manual-attached');
+      var submit = document.getElementById('manual-submit');
+      if (!form || !notes || !picker) return;
+
+      // Pasting a screenshot is how this feature is actually used -- Win+Shift+S
+      // then Ctrl+V, without ever saving a file. The clipboard image is put into
+      // the file input's own FileList so it posts through the ordinary multipart
+      // form with no separate upload path to secure.
+      var pasted = [];
+      var describe = function() {
+        var box = new DataTransfer();
+        pasted.forEach(function(file) { box.items.add(file); });
+        picker.files = box.files;
+        attached.hidden = pasted.length === 0;
+        attached.textContent = pasted.length
+          ? pasted.length + ' pasted image' + (pasted.length === 1 ? '' : 's') + ' attached.'
+          : '';
+      };
+
+      notes.addEventListener('paste', function(event) {
+        var clipboard = event.clipboardData;
+        if (!clipboard) return;
+
+        // Copying out of Outlook, Word or Excel puts a picture of the selection
+        // on the clipboard *alongside* its text, and Chrome offers that picture
+        // here as an image/png file. Taking it turned a pasted email into "a
+        // screenshot" with none of its words in the notes box. Text wins
+        // whenever the clipboard carries any: a real screenshot (Win+Shift+S)
+        // has no text flavour at all and still attaches.
+        if ((clipboard.getData('text/plain') || '').trim()) return;
+
+        var items = clipboard.items || [];
+        var images = [];
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].kind === 'file' && items[i].type.indexOf('image/') === 0) {
+            var file = items[i].getAsFile();
+            if (file) images.push(file);
+          }
+        }
+        if (!images.length) return;   // ordinary text paste: leave it alone
+        event.preventDefault();
+        pasted = pasted.concat(images).slice(0, {{ max_images }});
+        describe();
+      });
+
+      // Choosing files by hand replaces anything pasted, so the two ways of
+      // attaching cannot silently add up past the limit.
+      picker.addEventListener('change', function() {
+        if (picker.files && picker.files.length) {
+          pasted = [];
+          attached.hidden = true;
+        }
+      });
+
+      // One model call takes a few seconds, and a second click would start a
+      // second lead rather than hurrying the first.
+      form.addEventListener('submit', function() {
+        submit.disabled = true;
+        submit.textContent = 'Reading…';
+      });
+    })();
+  </script>
+{% endblock %}

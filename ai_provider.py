@@ -4,6 +4,7 @@ The standard ``OPENAI_API_KEY`` name is preferred. ``CHATGPT_API`` remains an
 accepted alias because that is the name used by the existing local deployment.
 """
 
+import base64
 import json
 import os
 import re
@@ -109,6 +110,39 @@ def call_llm(prompt: str, provider: str = None, max_tokens: int = 2048,
             '(OPENAI_API_KEY or CHATGPT_API missing in secrets/environment).'
         )
     return _call_openai(prompt, api_key, max_tokens=max_tokens, model=model)
+
+
+def call_llm_with_images(prompt: str, images, max_tokens: int = 2048,
+                         model: str = None) -> str:
+    """Execute a text+image request. `images` is an iterable of
+    (mime_type, raw_bytes) pairs.
+
+    Separate from call_llm() rather than an optional argument on it: the
+    Responses API takes a bare string for text alone but needs the full
+    role/content-parts form the moment an image is attached, and every
+    existing caller passes text. Images are inlined as data URLs, so nothing
+    has to be uploaded first or hosted anywhere reachable.
+    """
+    api_key = get_openai_key()
+    if not api_key:
+        raise ValueError(
+            'No OpenAI API key available '
+            '(OPENAI_API_KEY or CHATGPT_API missing in secrets/environment).'
+        )
+
+    content = [{'type': 'input_text', 'text': prompt}]
+    for mime_type, raw in images or ():
+        encoded = base64.b64encode(raw).decode('ascii')
+        content.append({
+            'type': 'input_image',
+            'image_url': f'data:{mime_type};base64,{encoded}',
+        })
+
+    return _response_text(_post_responses({
+        'model': model or DEFAULT_OPENAI_MODEL,
+        'input': [{'role': 'user', 'content': content}],
+        'max_output_tokens': max_tokens,
+    }, api_key))
 
 
 def call_llm_with_tools(prompt: str, tools: list, dispatch, max_rounds: int = 8,

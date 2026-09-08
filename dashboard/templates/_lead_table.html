@@ -17,7 +17,7 @@
     </td>
   </tr>
   <tr><td>Location</td><td>{{ lead.location or '—' }}</td></tr>
-  <tr><td>Email Date</td><td>{% if lead.received_date_formatted %}<strong>{{ lead.received_date_formatted }}</strong>{% else %}<span class="meta">Unknown</span>{% endif %}</td></tr>
+  <tr><td>{{ 'Email Date' if lead.has_source_email else 'Entered' }}</td><td>{% if lead.received_date_formatted %}<strong>{{ lead.received_date_formatted }}</strong>{% else %}<span class="meta">Unknown</span>{% endif %}</td></tr>
   <tr>
     <td>Territory</td>
     <td>
@@ -40,7 +40,10 @@
           </form>
         {% endif %}
       {% endif %}
-      {% if lead.assigned_tm_basis %}<span class="meta">&middot; {{ lead.assigned_tm_basis }}</span>{% endif %}
+      {# Keep the dashboard summary concise. The only routing note shown is
+         the lead's state beside an assigned Territory Manager. Internal
+         assignment explanations remain stored for diagnostics. #}
+      {% if lead.assigned_tm and lead.state %}<span class="meta">&middot; {{ lead.state }}</span>{% endif %}
     </td>
   </tr>
   <tr>
@@ -49,10 +52,8 @@
     <td>
       {% if lead.sales_rep %}
         {{ lead.sales_rep }}
-        <span class="meta">&middot; {{ lead.sales_rep_basis }}</span>
       {% else %}
         <span class="text-warn">Unassigned</span>
-        {% if lead.sales_rep_basis %}<span class="meta">&middot; {{ lead.sales_rep_basis }}</span>{% endif %}
       {% endif %}
     </td>
   </tr>
@@ -71,9 +72,9 @@
     </td>
   </tr>
   <tr>
-    <td>Source</td>
+    <td>Recipients</td>
     <td>
-      {{ lead.source }}
+      {{ lead.recipients_display or lead.other_recipients_label or 'None (Sales inbox only)' }}
       {% if lead.duplicate_of_lead_id %} &middot; possible duplicate of <a href="{{ url_for('lead_detail', lead_id=lead.duplicate_of_lead_id) }}">lead #{{ lead.duplicate_of_lead_id }}</a>{% endif %}
     </td>
   </tr>

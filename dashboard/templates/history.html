@@ -14,7 +14,7 @@
         </colgroup>
         <thead><tr>
           <th>Status</th><th>Name</th><th>Organization</th><th>Email</th>
-          <th>Email Date</th><th>Reviewed</th><th>Notes</th><th>Action</th>
+          <th>Email Date</th><th>Finished</th><th>Notes</th><th>Action</th>
         </tr></thead>
         <tbody>
           {% for lead in leads %}
@@ -31,7 +31,11 @@
               <td data-label="Organization">{{ lead.organization or '—' }}</td>
               <td data-label="Email">{{ lead.email or '—' }}</td>
               <td data-label="Email date">{{ lead.received_date_short or '—' }}</td>
-              <td data-label="Reviewed">{{ (lead.reviewed_at or '')[:16]|replace('T', ' ') or '—' }}</td>
+              {# The column the page is sorted on: when the lead went to Oracle,
+                 or when a reviewer rejected it. Showing reviewed_at here instead
+                 left the newest-first order looking arbitrary, because a lead is
+                 staged for review well before the batch it rides out with. #}
+              <td data-label="Finished">{{ lead.finished_at or '—' }}</td>
               <td data-label="Notes">{{ lead.review_notes or lead.submit_error or '—' }}</td>
               <td data-label="Action">
                 <div class="history-actions">

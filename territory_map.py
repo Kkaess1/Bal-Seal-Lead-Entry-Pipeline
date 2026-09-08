@@ -23,12 +23,11 @@ KNOWN DIVERGENCE FROM THAT PDF -- deliberate, do not "correct" it back:
     below is now John Pan. The PDF still reads Lisa Wolf, and being a scan it
     cannot be edited here, so the code is deliberately ahead of it until the
     sheet is reissued.
-  * 2026-08-14: Daniel Smoliga was replaced by John Pan, who now holds the
-    NORTHEAST territory (US states, the eastern Canadian provinces, and the
-    upper half of the Pennsylvania ZIP split) in addition to the Americas list
-    above. The PDF still reads Daniel Smoliga. One person holding two regions
-    is intentional -- do not merge the two into a single block, they are
-    separate rows on the sheet and can be reassigned separately.
+  * 2026-08-14: Daniel Smoliga was replaced by John Pan, who held the
+    NORTHEAST territory in addition to the Americas list.
+  * 2026-08-18: John Pan's NORTHEAST territories (US states CT, DE, MA, ME, NH,
+    NJ, NY, RI, VT, PA Zip 17000 & above, and Canadian provinces NL, NS, QC)
+    were transferred to Bill Rost. John Pan continues to hold the Americas list.
 """
 
 # --- International: country name (lowercased) -> TM ---
@@ -107,17 +106,17 @@ COUNTRY_TO_TM = {
 # (by ZIP or county) rather than being one state -> TM entry -- handled as special
 # cases in assign_tm() below, not in this dict.
 US_STATE_TO_TM = {
-    # John Pan (NORTHEAST) -- took over from Daniel Smoliga on 2026-08-14
-    'connecticut': 'John Pan', 'delaware': 'John Pan',
-    'massachusetts': 'John Pan', 'maine': 'John Pan',
-    'new hampshire': 'John Pan', 'new jersey': 'John Pan',
-    'new york': 'John Pan', 'rhode island': 'John Pan',
-    'vermont': 'John Pan',
+    # Bill Rost (NORTHEAST) -- transferred from John Pan on 2026-08-18
+    'connecticut': 'Bill Rost', 'delaware': 'Bill Rost',
+    'massachusetts': 'Bill Rost', 'maine': 'Bill Rost',
+    'new hampshire': 'Bill Rost', 'new jersey': 'Bill Rost',
+    'new york': 'Bill Rost', 'rhode island': 'Bill Rost',
+    'vermont': 'Bill Rost', 'pennsylvania': 'Bill Rost',
 
-    # Brian Carter (WEST)
-    'alaska': 'Brian Carter', 'colorado': 'Brian Carter', 'hawaii': 'Brian Carter',
-    'idaho': 'Brian Carter', 'montana': 'Brian Carter', 'oregon': 'Brian Carter',
-    'utah': 'Brian Carter', 'washington': 'Brian Carter', 'wyoming': 'Brian Carter',
+    # Keaton Kaess (WEST)
+    'alaska': 'Keaton Kaess', 'colorado': 'Keaton Kaess', 'hawaii': 'Keaton Kaess',
+    'idaho': 'Keaton Kaess', 'montana': 'Keaton Kaess', 'oregon': 'Keaton Kaess',
+    'utah': 'Keaton Kaess', 'washington': 'Keaton Kaess', 'wyoming': 'Keaton Kaess',
 
     # Jeff Frederick (SOUTHERN CALIFORNIA)
     'arizona': 'Jeff Frederick', 'new mexico': 'Jeff Frederick',
@@ -143,17 +142,17 @@ US_STATE_TO_TM = {
 # New Brunswick and Prince Edward Island aren't in the source table at all -- left
 # out rather than guessed. Keyed by both postal abbreviation and full name.
 CANADA_PROVINCE_TO_TM = {
-    # John Pan (NORTHEAST) -- took over from Daniel Smoliga on 2026-08-14
-    'nl': 'John Pan', 'newfoundland and labrador': 'John Pan',
-    'ns': 'John Pan', 'nova scotia': 'John Pan',
-    'qc': 'John Pan', 'quebec': 'John Pan',
+    # Bill Rost (NORTHEAST) -- transferred from John Pan on 2026-08-18
+    'nl': 'Bill Rost', 'newfoundland and labrador': 'Bill Rost',
+    'ns': 'Bill Rost', 'nova scotia': 'Bill Rost',
+    'qc': 'Bill Rost', 'quebec': 'Bill Rost',
 
-    # Brian Carter (WEST)
-    'ab': 'Brian Carter', 'alberta': 'Brian Carter',
-    'bc': 'Brian Carter', 'british columbia': 'Brian Carter',
-    'nwt': 'Brian Carter', 'nt': 'Brian Carter', 'northwest territories': 'Brian Carter',
-    'sk': 'Brian Carter', 'saskatchewan': 'Brian Carter',
-    'yt': 'Brian Carter', 'yukon': 'Brian Carter',
+    # Keaton Kaess (WEST)
+    'ab': 'Keaton Kaess', 'alberta': 'Keaton Kaess',
+    'bc': 'Keaton Kaess', 'british columbia': 'Keaton Kaess',
+    'nwt': 'Keaton Kaess', 'nt': 'Keaton Kaess', 'northwest territories': 'Keaton Kaess',
+    'sk': 'Keaton Kaess', 'saskatchewan': 'Keaton Kaess',
+    'yt': 'Keaton Kaess', 'yukon': 'Keaton Kaess',
 
     # Wade Kahout (MIDWEST)
     'mb': 'Wade Kahout', 'manitoba': 'Wade Kahout',
@@ -162,6 +161,16 @@ CANADA_PROVINCE_TO_TM = {
     # Bill Rost (MIDEAST)
     'on': 'Bill Rost', 'ontario': 'Bill Rost',
 }
+
+# Canonical choices for any UI that allows a manual Territory Manager override.
+# Derive this from the routing tables so the dropdown cannot drift away from the
+# names assign_tm() actually produces when territories change hands.
+TERRITORY_MANAGERS = tuple(sorted({
+    tm
+    for mapping in (COUNTRY_TO_TM, US_STATE_TO_TM, CANADA_PROVINCE_TO_TM)
+    for tm in mapping.values()
+    if tm
+}))
 
 US_STATE_ABBR = {
     'AL': 'Alabama', 'AK': 'Alaska', 'AZ': 'Arizona', 'AR': 'Arkansas', 'CA': 'California',
@@ -178,8 +187,8 @@ US_STATE_ABBR = {
 }
 
 # ZIP-code / county splits called out explicitly in the source table.
-_CA_SOUTHERN_MAX_ZIP = 93599   # <= this -> Jeff Frederick (Southern CA), else -> Brian Carter (West)
-_PA_ROST_MAX_ZIP = 16999       # <= this -> Bill Rost, else -> John Pan (Northeast)
+_CA_SOUTHERN_MAX_ZIP = 93599   # <= this -> Jeff Frederick (Southern CA), else -> Keaton Kaess (West)
+
 
 # The ZIP ranges those two states actually occupy. Only these two states are
 # split by ZIP, so only these two can be misrouted by a ZIP that does not
@@ -411,21 +420,15 @@ def assign_tm(lead):
                 return None, 'California -- need a ZIP code to determine North/South split'
             if int(zip5) <= _CA_SOUTHERN_MAX_ZIP:
                 return 'Jeff Frederick', f'California, ZIP {zip5} (<= {_CA_SOUTHERN_MAX_ZIP})'
-            return 'Brian Carter', f'California, ZIP {zip5} (> {_CA_SOUTHERN_MAX_ZIP})'
+            return 'Keaton Kaess', f'California, ZIP {zip5} (> {_CA_SOUTHERN_MAX_ZIP})'
 
-        if state == 'pennsylvania':
-            if not zip5:
-                return None, 'Pennsylvania -- need a ZIP code to determine territory split'
-            if int(zip5) <= _PA_ROST_MAX_ZIP:
-                return 'Bill Rost', f'Pennsylvania, ZIP {zip5} (<= {_PA_ROST_MAX_ZIP})'
-            return 'John Pan', f'Pennsylvania, ZIP {zip5} (> {_PA_ROST_MAX_ZIP})'
 
         if state == 'nevada':
             if not zip5:
                 return None, 'Nevada -- need a ZIP code to determine the Clark County split'
             if zip5[:3] in _CLARK_COUNTY_NV_ZIP3:
                 return 'Jeff Frederick', f'Nevada, ZIP {zip5} -- inferred Clark County (ZIP-prefix heuristic, verify)'
-            return 'Brian Carter', f'Nevada, ZIP {zip5} -- inferred not Clark County (ZIP-prefix heuristic, verify)'
+            return 'Keaton Kaess', f'Nevada, ZIP {zip5} -- inferred not Clark County (ZIP-prefix heuristic, verify)'
 
         if state in US_STATE_TO_TM:
             return US_STATE_TO_TM[state], f'US state: {state_raw}'
@@ -454,7 +457,7 @@ if __name__ == '__main__':
         {'country': 'USA', 'state': 'OH'},
         {'country': 'USA', 'state': 'CA', 'zip': '90210'},   # LA -> Southern CA
         {'country': 'USA', 'state': 'CA', 'zip': '94105'},   # SF -> West
-        {'country': 'USA', 'state': 'PA', 'zip': '19102'},   # Philadelphia -> John Pan (Northeast)
+        {'country': 'USA', 'state': 'PA', 'zip': '19102'},   # Philadelphia -> Bill Rost
         {'country': 'USA', 'state': 'PA', 'zip': '15222'},   # Pittsburgh -> Bill Rost
         {'country': 'USA', 'state': 'NV', 'zip': '89101'},   # Las Vegas -> Clark County
         {'country': 'USA', 'state': 'NV', 'zip': '89501'},   # Reno -> not Clark County

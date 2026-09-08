@@ -519,10 +519,17 @@ def fetch_new_messages():
     """
     run_started_at = datetime.now()
     last_checked_str = db.get_run_state(_LAST_CHECKED_KEY)
+    lookback_floor = run_started_at - timedelta(days=1)  # Always check at least 24h back
     if last_checked_str:
-        last_checked = datetime.fromisoformat(last_checked_str)
+        try:
+            last_checked = datetime.fromisoformat(last_checked_str)
+            if last_checked.tzinfo is not None:
+                last_checked = last_checked.astimezone().replace(tzinfo=None)
+            last_checked = min(last_checked, lookback_floor)
+        except (ValueError, TypeError):
+            last_checked = lookback_floor
     else:
-        last_checked = run_started_at - timedelta(days=1)  # first run: baseline to last 24h
+        last_checked = lookback_floor
 
     namespace = _connect()
     inbox = _get_sales_inbox(namespace)
@@ -608,6 +615,9 @@ def _attachment_kind(name):
     return suffix.lstrip('.') or 'file'
 
 
+_PR_ATTACH_FLAGS = 'http://schemas.microsoft.com/mapi/proptag/0x37140003'
+
+
 def _visible_attachments(item):
     """
     The attachments worth showing a person, as (outlook_index, name, size).
@@ -627,9 +637,24 @@ def _visible_attachments(item):
         try:
             att = item.Attachments.Item(i)
             name = (att.FileName or '').strip()
-            if not name or _EMBEDDED_IMAGE_RE.match(name):
+            if not name:
                 continue
-            found.append((i, name[:200], int(getattr(att, 'Size', 0) or 0)))
+
+            # MAPI PR_ATTACH_FLAGS bit 4 (0x4) indicates ATT_INVISIBLE_IN_HTML (inline signature/body image)
+            pa = getattr(att, 'PropertyAccessor', None)
+            if pa:
+                try:
+                    flags = pa.GetProperty(_PR_ATTACH_FLAGS)
+                    if flags is not None and (int(flags) & 4 != 0):
+                        continue
+                except (pywintypes.com_error, AttributeError, ValueError):
+                    pass
+
+            if _EMBEDDED_IMAGE_RE.match(name):
+                continue
+
+            size = int(getattr(att, 'Size', 0) or 0)
+            found.append((i, name[:200], size))
         except (pywintypes.com_error, AttributeError, ValueError):
             # One unreadable attachment shouldn't cost us the rest of the list.
             continue

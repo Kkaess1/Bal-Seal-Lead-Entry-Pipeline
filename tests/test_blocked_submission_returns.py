@@ -17,12 +17,32 @@ test_an_unknown_outcome_is_never_returned_automatically.
 
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import db
 import pipeline_submit
 from dashboard.app import _build_alert, app
+import territory_map
+
+
+class _AssignedTmSelectParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_tm_select = False
+        self.options = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'select' and attrs.get('name') == 'assigned_tm':
+            self.in_tm_select = True
+        elif tag == 'option' and self.in_tm_select:
+            self.options.append((attrs.get('value'), 'selected' in attrs))
+
+    def handle_endtag(self, tag):
+        if tag == 'select' and self.in_tm_select:
+            self.in_tm_select = False
 
 
 class _Base(unittest.TestCase):
@@ -302,6 +322,27 @@ class RecallFromQueueTests(_Base):
         self._post(f'/leads/{lead_id}/save', assigned_tm='Mark Copeland')
 
         self.assertEqual(db.get_lead(lead_id)['assigned_tm'], 'Mark Copeland')
+
+    def test_manager_field_is_a_dropdown_with_every_canonical_tm(self):
+        lead_id = self._lead(status='pending_review', assigned_tm='Wade Kahout')
+        parser = _AssignedTmSelectParser()
+        parser.feed(self._detail(lead_id))
+
+        self.assertEqual(
+            [value for value, _selected in parser.options],
+            ['', *territory_map.TERRITORY_MANAGERS],
+        )
+        self.assertIn(('Wade Kahout', True), parser.options)
+
+    def test_manager_save_rejects_wrong_capitalization(self):
+        lead_id = self._lead(status='pending_review', assigned_tm='Wade Kahout')
+
+        response = self._post(
+            f'/leads/{lead_id}/save', assigned_tm='wade kahout'
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(db.get_lead(lead_id)['assigned_tm'], 'Wade Kahout')
 
     def test_a_lead_a_run_is_sending_is_never_taken_back(self):
         # It may be mid-POST; its way out is check_oracle, which asks Oracle

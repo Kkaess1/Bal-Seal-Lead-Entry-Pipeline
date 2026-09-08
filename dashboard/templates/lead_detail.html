@@ -73,7 +73,7 @@
             <div class="edit-grid">
               {% for field in fields %}
                 <label class="edit-field{% if field in ('lead_details', 'notes_body', 'survey_answers', 'qualifiers') %} edit-field-wide{% endif %}">
-                  <span>{{ field|replace('_', ' ')|title|replace('Zip', 'ZIP') }}</span>
+                  <span>{{ field|replace('_', ' ')|title|replace('Zip', 'ZIP')|replace('Tm', 'TM') }}</span>
                   {% if field == 'lead_details' and lead.translated_from %}
                     <span class="translation-notice">Translated from {{ lead.translated_from }} to English</span>
                   {% endif %}
@@ -83,10 +83,16 @@
                     <select name="rank">
                       {% for value in ('', 'HOT', 'WARM') %}<option value="{{ value }}"{% if (lead.rank or '')|upper == value %} selected{% endif %}>{{ value or 'Not set' }}</option>{% endfor %}
                     </select>
+                  {% elif field == 'assigned_tm' %}
+                    <select name="assigned_tm">
+                      <option value=""{% if not lead.assigned_tm %} selected{% endif %}>Unassigned</option>
+                      {% for tm in territory_managers %}
+                        <option value="{{ tm }}"{% if lead.assigned_tm == tm %} selected{% endif %}>{{ tm }}</option>
+                      {% endfor %}
+                    </select>
                   {% else %}
                     <input type="{{ 'email' if field == 'email' else 'url' if field == 'website' else 'text' }}" name="{{ field }}" value="{{ lead[field] or '' }}">
                   {% endif %}
-                  {% if field == 'assigned_tm' and lead.assigned_tm_basis %}<small>{{ lead.assigned_tm_basis }}</small>{% endif %}
                 </label>
               {% endfor %}
             </div>
@@ -109,10 +115,8 @@
         <div style="margin-top: 0.35rem;">
           {% if lead.sales_rep %}
             <strong>{{ lead.sales_rep }}</strong>
-            <span class="meta">&middot; {{ lead.sales_rep_basis }}</span>
           {% else %}
             <span class="text-warn">Unassigned</span>
-            {% if lead.sales_rep_basis %}<span class="meta">&middot; {{ lead.sales_rep_basis }}</span>{% endif %}
           {% endif %}
         </div>
       </div>
@@ -186,7 +190,9 @@
       </div>
     {% endif %}
 
-    {% if lead.status in editable_statuses %}
+    {# Reply/Forward/Delete act on the Outlook message. A hand-entered
+       lead (manual_lead.py) has none -- see _decorate(). #}
+    {% if lead.status in editable_statuses and lead.has_source_email %}
       <div class="email-actions">
         {% if delete_enabled %}
           <button type="button" class="btn email-action email-action-danger" id="open-delete-dialog"
@@ -226,7 +232,7 @@
     {% endif %}
   </div>
 
-  {% if lead.status in editable_statuses %}
+  {% if lead.status in editable_statuses and lead.has_source_email %}
     <dialog class="forward-dialog" id="forward-dialog">
       <form method="post" action="{{ url_for('forward_lead_email', lead_id=lead.id) }}">
         <div class="forward-dialog-head">
@@ -265,16 +271,21 @@
           dialog.showModal();
           document.getElementById('forward-recipient').focus();
         });
+        var backdropMousedown = false;
+        dialog.addEventListener('mousedown', function(event) {
+          backdropMousedown = (event.target === dialog);
+        });
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.forward-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
-          if (event.target === dialog) closeDialog();
+          if (event.target === dialog && backdropMousedown) closeDialog();
+          backdropMousedown = false;
         });
       })();
     </script>
   {% endif %}
 
-  {% if lead.status in editable_statuses %}
+  {% if lead.status in editable_statuses and lead.has_source_email %}
     <dialog class="forward-dialog" id="reply-dialog">
       <form method="post" action="{{ url_for('reply_lead_email', lead_id=lead.id) }}">
         <div class="forward-dialog-head">
@@ -384,16 +395,21 @@
             });
           });
         });
+        var backdropMousedown = false;
+        dialog.addEventListener('mousedown', function(event) {
+          backdropMousedown = (event.target === dialog);
+        });
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.reply-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
-          if (event.target === dialog) closeDialog();
+          if (event.target === dialog && backdropMousedown) closeDialog();
+          backdropMousedown = false;
         });
       })();
     </script>
   {% endif %}
 
-  {% if lead.status in editable_statuses and delete_enabled %}
+  {% if lead.status in editable_statuses and lead.has_source_email and delete_enabled %}
     <dialog class="forward-dialog" id="delete-dialog">
       <form method="post" action="{{ url_for('delete_lead_email', lead_id=lead.id) }}">
         <div class="forward-dialog-head">
@@ -418,10 +434,15 @@
         if (!dialog || !openButton) return;
         var closeDialog = function() { dialog.close(); };
         openButton.addEventListener('click', function() { dialog.showModal(); });
+        var backdropMousedown = false;
+        dialog.addEventListener('mousedown', function(event) {
+          backdropMousedown = (event.target === dialog);
+        });
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.delete-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
-          if (event.target === dialog) closeDialog();
+          if (event.target === dialog && backdropMousedown) closeDialog();
+          backdropMousedown = false;
         });
       })();
     </script>

@@ -49,12 +49,12 @@ class ExtractQuotedHistoryTests(unittest.TestCase):
 
         self.assertNotIn('can someone please assist', quoted)
 
-    def test_it_is_exactly_what_the_display_cleaner_removes(self):
+    def test_display_cleaner_retains_full_thread_history(self):
         cleaned = email_cleaner.clean_email_body(REPLY_WITH_HISTORY)
         quoted = email_cleaner.extract_quoted_history(REPLY_WITH_HISTORY)
 
         self.assertIn('can someone please assist', cleaned)
-        self.assertNotIn('confirm the lead time', cleaned)
+        self.assertIn('confirm the lead time', cleaned)
         self.assertIn('confirm the lead time', quoted)
 
     def test_a_first_contact_email_quotes_nothing(self):

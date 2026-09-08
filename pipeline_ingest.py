@@ -310,7 +310,7 @@ def process_message(msg, force=False, ingest_batch_id=None):
             return False
         message_row_id = existing['id']
         # Backfill for rows inserted before attachments were recorded.
-        if msg.get('attachments') and not existing.get('attachments'):
+        if msg.get('attachments') and not db.get_message_attachments(message_row_id):
             db.record_attachments(message_row_id, msg['attachments'])
         # Backfill for rows inserted before .msg export existed, or whose
         # earlier export attempt failed.

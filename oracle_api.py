@@ -9,6 +9,7 @@ identifiers needed for audit/retry.
 import base64
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -224,7 +225,7 @@ def _put(payload, key, value):
 def build_lead_payload(lead, trade_show_name, source_label='Tradeshow',
                        lead_source='Website', campaign_name=None,
                        market_map=None, existing=None, country_format='code',
-                       website_field=None):
+                       website_field=None, owner_resolver=None):
     """
     Convert the pipeline's lead shape into Oracle's REST lead payload.
 
@@ -240,6 +241,11 @@ def build_lead_payload(lead, trade_show_name, source_label='Tradeshow',
     as a 400 that rejects the whole lead, so a guess here would cost far more
     than the field is worth. Run oracle_field_probe.py once to read the real
     name off the tenant. Unset simply means no website is sent.
+
+    `owner_resolver` turns a Territory Manager name into the spelling
+    Oracle will actually match -- see OracleLeadApiClient.resolve_owner().
+    Optional so this stays a pure function; without one the name is sent
+    as stored, which is what it did before the resolver existed.
 
     Returns (payload, project_name, warnings). Warnings are non-fatal mapping
     notes that should be stored with the lead for review.
@@ -343,10 +349,45 @@ def build_lead_payload(lead, trade_show_name, source_label='Tradeshow',
 
     assigned_tm = _clean(lead.get('assigned_tm'))
     if assigned_tm:
-        # This field exists on create in Oracle's public schema. If this tenant
-        # rejects owner-by-name, the 400 will surface and the lead will retry
-        # after we map OwnerPartyNumber/OwnerId.
-        payload['OwnerPartyName'] = assigned_tm
+        # Oracle matches this field on create as an exact, case-sensitive
+        # string, and a near-miss is discarded in silence: 201 Created, no
+        # warning, and the lead owned by whoever the API authenticated as
+        # rather than by the rep. That is not a hypothetical -- 'Marcus
+        # James' for Oracle's 'MARCUS JAMES' sent every UK, Ireland and
+        # Scandinavian lead to the API account for weeks, and nothing in
+        # the pipeline noticed. An earlier comment here predicted a 400
+        # would surface such a mismatch; no 400 ever comes.
+        #
+        # So the name is resolved against Oracle first, which is
+        # case-insensitive, and what gets sent is Oracle's own spelling.
+        resolved = owner_resolver(assigned_tm) if owner_resolver else None
+        if resolved and resolved.get('name'):
+            payload['OwnerPartyName'] = resolved['name']
+            # Case and spacing are what the resolver is for, so correcting
+            # those is not news -- every Marcus James lead would carry the
+            # same notice forever. A match that changed more than that is
+            # worth a look: it means Oracle matched a different string.
+            if resolved['name'].casefold().split() != assigned_tm.casefold().split():
+                warnings.append(
+                    f'Territory Manager "{assigned_tm}" matched Oracle resource '
+                    f'"{resolved["name"]}"; check it is the right person.'
+                )
+            if resolved.get('ambiguous'):
+                warnings.append(
+                    f'More than one Oracle resource matches "{assigned_tm}"; '
+                    f'used {resolved["name"]} ({resolved.get("party_number")}).'
+                )
+        else:
+            # Send it anyway -- unchanged from the old behaviour -- but say
+            # so on the lead. Silence is the actual defect being fixed here.
+            payload['OwnerPartyName'] = assigned_tm
+            if owner_resolver:
+                warnings.append(
+                    f'No Oracle resource matches Territory Manager '
+                    f'"{assigned_tm}"; Oracle will ignore the owner and the '
+                    f'lead will belong to the submitting account. Check the '
+                    f'spelling against Oracle.'
+                )
 
     return {k: v for k, v in payload.items() if v is not None}, project_name, warnings
 
@@ -384,6 +425,9 @@ class OracleLeadApiClient:
         self.username = username
         self.password = password
         self.session = session or requests.Session()
+        # Territory Manager name -> Oracle resource, filled on demand.
+        # See resolve_owner() for why the lookup exists at all.
+        self._owner_cache = {}
 
     @property
     def leads_url(self):
@@ -423,6 +467,71 @@ class OracleLeadApiClient:
                 raise OracleApiError('Oracle lookup returned invalid JSON') from e
         except (requests.RequestException, ValueError) as e:
             raise OracleApiError(f'Oracle lookup request failed: {e}') from e
+
+    @property
+    def resources_url(self):
+        return f'{self.base_url}/crmRestApi/resources/{API_VERSION}/resources'
+
+    def resolve_owner(self, name):
+        """
+        The Oracle resource for a Territory Manager name, or None.
+
+        Oracle matches OwnerPartyName on create as an exact, case-sensitive
+        string. Anything off by one letter's case is discarded in silence --
+        no 400, no warning, a 201 like any other -- and the lead is left owned
+        by whoever the API authenticated as. Across the first 43 submissions
+        the correlation was total: 39 names that matched Oracle's spelling
+        exactly kept their owner, and the 3 that differed only in case
+        (`Marcus James` for `MARCUS JAMES`, `john Pan`, `jeff Frederick`) all
+        landed on the API account instead.
+
+        This query is the part that is case-insensitive, so it is what turns
+        whatever the territory map or a hand-typed override says into the
+        spelling Oracle will actually match. Returns the canonical PartyName
+        alongside PartyId so the caller does not have to care which one it
+        sends.
+
+        Cached per client: one submit run routes many leads to the same
+        handful of reps, and the set does not change mid-run.
+        """
+        key = (name or '').strip().lower()
+        if not key:
+            return None
+        if key in self._owner_cache:
+            return self._owner_cache[key]
+
+        result = None
+        try:
+            items = self._query(
+                self.resources_url,
+                f"PartyName LIKE '{_q_escape(name.strip())}'",
+                'PartyName,PartyId,PartyNumber,EndDateActive',
+                limit=5,
+            )
+            # A retired rep keeps their resource record; EndDateActive is what
+            # separates them from a current one. Oracle writes 4712-12-31 for
+            # "no end date", so a plain date comparison keeps the active rows.
+            today = datetime.now(timezone.utc).date().isoformat()
+            active = [i for i in items
+                      if not i.get('EndDateActive') or i['EndDateActive'] >= today]
+            candidates = active or items
+            if candidates:
+                result = {
+                    'name': candidates[0].get('PartyName'),
+                    'party_id': candidates[0].get('PartyId'),
+                    'party_number': candidates[0].get('PartyNumber'),
+                    'ambiguous': len(candidates) > 1,
+                }
+        except OracleApiError as exc:
+            # Never fatal. Failing to look the name up is not a reason to
+            # refuse a lead -- the payload falls back to the name as stored,
+            # which is exactly what it sent before this existed.
+            logger.warning('Could not resolve Oracle owner %r: %s', name, exc)
+            return None
+
+        self._owner_cache[key] = result
+        return result
+
 
     def find_contact_by_email(self, email):
         """The Oracle contact with this exact email, or None.
@@ -533,6 +642,7 @@ class OracleLeadApiClient:
             existing=existing,
             country_format=self.country_format,
             website_field=self.website_field,
+            owner_resolver=self.resolve_owner,
         )
         logger.info(
             'Submitting lead via Oracle REST API: %s (account/contact match: %s)',

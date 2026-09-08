@@ -48,6 +48,7 @@ Oracle lead outcomes daily.
 | :--- | :--- | :--- | :--- |
 | **Oracle Outcome Sync** | `python oracle_sync.py` | **Daily (default 6:00 AM)** | Read-only refresh of lead qualification, conversion, opportunities, and estimated revenue. |
 | **Review Dashboard** | `pythonw dashboard\serve.py` | **At logon, stays up** | Serves the review dashboard on http://127.0.0.1:5151. Windowless, restarts up to 3× on failure, a 10-minute heartbeat restarts it if it ever dies, and no execution time limit (the default would kill it after 3 days). |
+| **Lead Retention Purge** | `python purge_old_leads.py --apply` | **Daily (default 7:00 AM)** | Permanently deletes finished leads past the retention policy — rejected after 30 days, everything else finished after a year — and their cached email. Leads awaiting review are never touched. Runs *after* the Oracle sync so a lead's final outcome is counted before it goes. |
 
 The dashboard task runs as the signed-in user with an interactive logon type,
 in the same session as Outlook — its reply/forward/delete actions and the
@@ -64,7 +65,18 @@ Double-click or run the included batch script in PowerShell:
 ```powershell
 .\setup_scheduler.bat
 .\setup_oracle_sync_task.ps1
+.\setup_retention_task.ps1
 ```
+
+**Retention deletes customer data permanently and writes no backup.** Check
+what it would remove before registering the task:
+
+```powershell
+py purge_old_leads.py            # dry run, deletes nothing
+```
+
+README "Retention" documents the policy, and why the status page's totals,
+conversion rates and funnel do not drop when leads are deleted.
 
 **Ingestion runs on demand:** the **Click to ingest leads** button on Pending
 Review, or `py pipeline_ingest.py`.

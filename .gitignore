@@ -52,3 +52,10 @@ dashboard.log
 # OS files
 .DS_Store
 Thumbs.db
+
+# Ad-hoc Oracle inventory / report dumps written by the scratch_* scripts.
+# Same third-party PII as input/ -- real customer names, companies and Oracle
+# lead numbers -- and `*.json` / `*.xlsx` are otherwise tracked file types, so
+# these need naming explicitly or a `git add -A` publishes them.
+scratch_*.json
+scratch_*.xlsx

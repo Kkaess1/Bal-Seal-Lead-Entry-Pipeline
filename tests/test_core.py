@@ -362,6 +362,116 @@ class EmailCleanerTests(unittest.TestCase):
             'Regards,\nTom Kivisto\n123 Main St, Minneapolis, MN 55401'
         )
 
+    # The same Gravity Forms mailer, after the 2026-08-27 template change that
+    # dropped the empty leading table cell from every answer row. Values now
+    # sit flush left, exactly like the labels above them.
+    GRAVITY_FLUSH_LEFT = (
+        'To get started, select one of the product types below. \t\n'
+        'Bal Spring \t\n'
+        'Please tell us what kind of service your Bal spring will perform. \t\n'
+        'Mechanical connecting \t\n'
+        'Tell us about your application or engineering challenge. \t\n'
+        'I need a latching mechanism with a consistent breakaway force.\n\n'
+        'Roughly 0.5" OD and 3 lbf. \t\n'
+        'Name* \t\n'
+        'David Lopez \t\n'
+        'Company \t\n'
+        'Varda Space \t\n'
+        'Email \t\n'
+        'david.lopez@varda.com <mailto:david.lopez@varda.com>  \t\n'
+        'Address \t\n'
+        'California\nUnited States\n'
+        'Map It <https://nam12.safelinks.protection.outlook.com/?url=trackingredirect1234> \t\n'
+        'Consent \t\n'
+        ' <https://www.balseal.com/wp-content/plugins/gravityforms/images/tick.png> '
+        'I agree to the privacy policy. \t\n'
+        'Consent \t\n'
+        ' <https://www.balseal.com/wp-content/plugins/gravityforms/images/tick.png> '
+        'Opt-in to product updates and info? \t\n'
+    )
+
+    DIRECT_LEAD_FLUSH_LEFT = (
+        'Product Interest: \t\n'
+        'Bal Contact \t\n'
+        'Name \t\n'
+        'Charles Dye \t\n'
+        'City \t\n'
+        'Los Angeles \t\n'
+        'Company \t\n'
+        'Eaton Aerospace \t\n'
+        'State/Province \t\n'
+        'California \t\n'
+        'Email \t\n'
+        'charliedye@eaton.com <mailto:charliedye@eaton.com>  \t\n'
+        'Country \t\n'
+        'United States \t\n'
+        'Comments \t\n'
+        'Looking for a drawing for part U-320LA-8. \t\n'
+        'Consent \t\n'
+        ' <https://www.balseal.com/wp-content/plugins/gravityforms/images/tick.png> '
+        'I agree to the privacy policy. \t\n'
+    )
+
+    def test_a_form_whose_answers_are_not_indented_is_still_a_form(self):
+        """On 2026-08-27 the website form stopped putting its answers in a
+        second table cell, so every line -- label and answer alike -- arrived
+        flush left. _parse_form_pairs() read all of them as labels, they
+        collapsed into a single pair with no recognisable contact fields, and
+        extract_form_submission() concluded the email was not a form at all.
+        The whole raw table then went into the lead Description as one run-on
+        paragraph of form prompts (leads 492 and 500-503)."""
+        cleaned = email_cleaner.clean_email_body(self.GRAVITY_FLUSH_LEFT)
+        self.assertEqual(
+            cleaned,
+            'Product type: Bal Spring\n\n'
+            'Service: Mechanical connecting\n\n'
+            'I need a latching mechanism with a consistent breakaway force.\n\n'
+            'Roughly 0.5" OD and 3 lbf.'
+        )
+
+    def test_the_flush_left_direct_lead_form_drops_its_contact_half(self):
+        """The contact rows are already parsed into their own Oracle fields
+        and shown above the Details row on the dashboard; repeating them
+        buries the one line the rep opened the lead to read."""
+        cleaned = email_cleaner.clean_email_body(self.DIRECT_LEAD_FLUSH_LEFT)
+        self.assertEqual(
+            cleaned,
+            'Product Interest: Bal Contact\n\n'
+            'Comments: Looking for a drawing for part U-320LA-8.'
+        )
+        for gone in ('Charles Dye', 'Los Angeles', 'charliedye@eaton.com', 'Consent'):
+            self.assertNotIn(gone, cleaned)
+
+    def test_a_link_caption_does_not_shift_every_later_row_by_one(self):
+        """Flush-left rows are paired by alternation, so one unpaired line
+        mid-table would offset every label after it -- the "Map It" caption
+        under the address made the consent captions read as field names, and
+        the form's chrome reappeared in the Description. A recognised contact
+        label re-anchors the alternation."""
+        pairs = email_cleaner._merge_unanswered_pairs(
+            email_cleaner._parse_form_pairs(
+                email_cleaner._LONG_BRACKETED_URL_RE.sub(
+                    '', email_cleaner._MAILTO_RE.sub('', self.GRAVITY_FLUSH_LEFT))))
+        answers = {label: ' '.join(v.strip() for v in value_lines).strip()
+                   for label, value_lines in pairs}
+        self.assertEqual(answers['Name*'], 'David Lopez')
+        self.assertEqual(answers['Company'], 'Varda Space')
+        self.assertEqual(answers['Email'], 'david.lopez@varda.com')
+        self.assertEqual(answers['Address'], 'California United States')
+        # The consent rows stay rows of their own rather than becoming the
+        # answers to the row above -- which is what makes them droppable.
+        self.assertNotIn('Consent', answers.values())
+
+    def test_the_indented_form_layout_is_parsed_exactly_as_before(self):
+        """The older layout still arrives from the other vendor, and its empty
+        leading cell already distinguishes an answer from a label. Deciding
+        the layout once per body keeps the new alternation rule away from it
+        entirely."""
+        self.assertTrue(email_cleaner._uses_indented_answers(self.GRAVITY))
+        self.assertTrue(email_cleaner._uses_indented_answers(self.JOTFORM))
+        self.assertFalse(email_cleaner._uses_indented_answers(self.GRAVITY_FLUSH_LEFT))
+        self.assertFalse(email_cleaner._uses_indented_answers(self.DIRECT_LEAD_FLUSH_LEFT))
+
     def test_prose_email_is_not_treated_as_a_form(self):
         prose = (
             'Hi,\n\nI am looking for canted coil springs\tfor a sliding mechanism.\n\n'

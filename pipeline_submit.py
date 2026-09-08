@@ -55,12 +55,16 @@ def setup_logging():
     )
     return log_file
 
-# Every lead originates in the Sales inbox. A spreadsheet attached to one of
-# those emails is a trade-show batch and gets labeled accordingly; a lead
-# extracted from the email body itself is a direct inquiry.
+# Where the lead came from, spelled out in the Oracle project name. A
+# spreadsheet attached to a Sales inbox email is a trade-show batch and gets
+# labeled accordingly; a lead extracted from the email body itself is a direct
+# inquiry; one typed into the dashboard by hand (see manual_lead.py) arrived
+# some other way entirely -- a phone call, a card, a colleague's forward --
+# and says so rather than claiming to have come from the website.
 _SOURCE_LABELS = {
     'email_excel_attachment': ('Tradeshow', 'Email Import'),
     'email_ai_extract': ('Inquiry', 'Website/Email'),
+    'manual_entry': ('Inquiry', 'Manual Entry'),
 }
 _DEFAULT_SOURCE_LABEL = ('Inquiry', 'Website/Email')
 

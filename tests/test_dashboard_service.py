@@ -29,6 +29,12 @@ class SingleInstanceTests(unittest.TestCase):
         # Socket closed: nothing is listening there now.
         self.assertFalse(serve.already_serving('127.0.0.1', port))
 
+    def test_main_returns_zero_when_already_serving(self):
+        from unittest.mock import patch
+        with patch('dashboard.serve.already_serving', return_value=True):
+            self.assertEqual(serve.main(), 0)
+
+
 
 class ServeEntryPointTests(unittest.TestCase):
     def test_project_root_is_importable_when_run_by_path(self):

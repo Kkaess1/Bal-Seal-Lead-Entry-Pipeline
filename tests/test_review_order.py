@@ -1,23 +1,29 @@
 """
-Every lead list is ordered like the Outlook inbox: newest email at the top.
+A lead still being worked on is listed like the Outlook inbox: newest email at
+the top. A lead that is finished is listed by when it finished.
 
-It used to be ordered by fraud risk, which bore no relation to the mailbox.
-The date it sorts on is the lead's own email, not the first message of its
-thread -- since earlier messages are kept as context, a reply to an old thread
-would otherwise date itself to that thread's start and sink to the bottom.
+Pending Review and the Input Queue used to order by fraud risk, which bore no
+relation to the mailbox. The date they sort on is the lead's own email, not
+the first message of its thread -- since earlier messages are kept as context,
+a reply to an old thread would otherwise date itself to that thread's start
+and sink to the bottom.
 
-History was the odd one out for longer: it is paginated, so it takes its order
-from SQL rather than the Python sort the other two pages use, and that SQL
-ordered by created_at -- ingest time, not email time. HistoryOrderTests below
-covers it, including the pagination case a Python-side sort cannot fix.
+History took that same inbox order for a while, and it was the wrong question
+to ask of a finished lead. One approved batch carries emails from a spread of
+dates, so the leads submitted in it scattered themselves through months of
+older ones and the page read as unordered -- the lead just sent to Oracle was
+rarely anywhere near the top. HistoryOrderTests below covers the order it uses
+instead, including the pagination case a Python-side sort cannot fix.
 """
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import db
+import lead_stages
 from dashboard.app import _decorate, _newest_first, app
 
 
@@ -124,75 +130,150 @@ class HistoryOrderTests(unittest.TestCase):
         app.config.update(TESTING=True, SECRET_KEY='test-secret')
         self.client = app.test_client()
 
-    def _reviewed_lead(self, name, received_at):
-        """A lead in a History status, whose email arrived at received_at."""
+    def _lead(self, name, received_at, **finished):
+        """A finished lead: its email arrived at received_at, and `finished`
+        says when and how it left the queue."""
         message_id = db.insert_message(
             f'entry-{name}', subject=f'Enquiry from {name}',
             sender_email=f'{name}@example.com', received_at=received_at,
         )
-        return db.insert_lead(
+        lead_id = db.insert_lead(
             {'first_name': name, 'email': f'{name}@example.com'},
-            'email_ai_extract', message_id=message_id, status='submitted',
+            'email_ai_extract', message_id=message_id, status='pending_review',
         )
+        db.update_lead_fields(lead_id, dict(finished))
+        return lead_id
 
-    def test_history_is_ordered_by_email_date_not_ingest_time(self):
-        # Inserted oldest-email-first, so ingest order is the reverse of the
-        # order we want. created_at ordering would hand these back as-inserted.
-        old = self._reviewed_lead('old', '2026-08-01T09:00:00+00:00')
-        new = self._reviewed_lead('new', '2026-08-10T09:00:00+00:00')
-        mid = self._reviewed_lead('mid', '2026-08-05T09:00:00+00:00')
+    def _submitted(self, name, received_at, submitted_at):
+        return self._lead(name, received_at,
+                          status='submitted', submitted_at=submitted_at)
 
-        ordered = [l['id'] for l in db.list_leads(status='submitted')]
+    def _history_order(self):
+        return [l['id'] for l in db.list_leads(
+            status=list(lead_stages.HISTORY), order='finished')]
 
-        self.assertEqual(ordered, [new, mid, old])
+    def test_the_most_recently_submitted_lead_is_first(self):
+        # The whole request: a lead sent to Oracle just now goes to the top,
+        # and is pushed down by the next one.
+        first = self._submitted('first', '2026-08-01T09:00:00+00:00',
+                                '2026-08-20T10:00:00+00:00')
+        second = self._submitted('second', '2026-08-02T09:00:00+00:00',
+                                 '2026-08-21T10:00:00+00:00')
+        third = self._submitted('third', '2026-08-03T09:00:00+00:00',
+                                '2026-08-22T10:00:00+00:00')
 
-    def test_two_emails_in_the_same_second_keep_their_real_order(self):
-        # The exact case seen in production: one ingest run, two emails a
-        # fraction of a second apart. Ordering by ingest time put the older
-        # of the two on top.
-        earlier = self._reviewed_lead('earlier', '2026-08-13T09:54:17.305000+00:00')
-        later = self._reviewed_lead('later', '2026-08-13T09:54:17.529000+00:00')
+        self.assertEqual(self._history_order(), [third, second, first])
 
-        ordered = [l['id'] for l in db.list_leads(status='submitted')]
+    def test_an_old_email_submitted_today_outranks_a_new_email_submitted_last_week(self):
+        # Exactly what made the page look disorganized: a batch approved today
+        # is full of emails from a spread of dates, so email order buried
+        # today's submissions among older leads.
+        old_email_sent_today = self._submitted(
+            'stale', '2026-06-01T09:00:00+00:00', '2026-08-28T09:00:00+00:00')
+        new_email_sent_last_week = self._submitted(
+            'fresh', '2026-08-20T09:00:00+00:00', '2026-08-21T09:00:00+00:00')
 
-        self.assertEqual(ordered, [later, earlier])
+        self.assertEqual(self._history_order(),
+                         [old_email_sent_today, new_email_sent_last_week])
+
+    def test_a_rejected_lead_is_placed_by_when_it_was_rejected(self):
+        # Nothing was ever sent, so submitted_at is NULL. reviewed_at is the
+        # moment that lead finished, and it has to sort against submitted_at
+        # rather than falling to the bottom of the page.
+        submitted = self._submitted('sent', '2026-08-01T09:00:00+00:00',
+                                    '2026-08-25T09:00:00+00:00')
+        rejected = self._lead('binned', '2026-08-02T09:00:00+00:00',
+                              status='rejected',
+                              reviewed_at='2026-08-26T09:00:00+00:00')
+
+        self.assertEqual(self._history_order(), [rejected, submitted])
+
+    def test_two_leads_submitted_by_the_same_run_keep_a_fixed_order(self):
+        # One submit run stamps every lead in the batch with the same second.
+        # Without the id tiebreak their order is the query planner's choice and
+        # can change between page loads.
+        earlier = self._submitted('earlier', '2026-08-01T09:00:00+00:00',
+                                  '2026-08-25T09:54:17+00:00')
+        later = self._submitted('later', '2026-08-02T09:00:00+00:00',
+                                '2026-08-25T09:54:17+00:00')
+
+        self.assertEqual(self._history_order(), [later, earlier])
+
+    def test_dismissing_an_alert_does_not_move_a_finished_lead(self):
+        # updated_at is only the last-resort key for a reason: it is touched
+        # long after a lead is done, and sorting on it would jump a months-old
+        # lead to the top the moment someone cleared its bell.
+        newest = self._submitted('newest', '2026-08-03T09:00:00+00:00',
+                                 '2026-08-27T09:00:00+00:00')
+        older = self._submitted('older', '2026-08-01T09:00:00+00:00',
+                                '2026-08-20T09:00:00+00:00')
+
+        db.dismiss_lead_alert(older)
+
+        self.assertEqual(self._history_order(), [newest, older])
 
     def test_order_holds_across_a_page_boundary(self):
         # A Python sort applied after LIMIT/OFFSET would order each page
         # internally and still put the wrong leads on page 1.
         ids_newest_first = [
-            self._reviewed_lead(f'lead{day:02d}', f'2026-08-{day:02d}T09:00:00+00:00')
+            self._submitted(f'lead{day:02d}', '2026-08-01T09:00:00+00:00',
+                            f'2026-08-{day:02d}T09:00:00+00:00')
             for day in range(1, 8)
         ][::-1]
 
-        page1 = [l['id'] for l in db.list_leads(status='submitted', limit=3, offset=0)]
-        page2 = [l['id'] for l in db.list_leads(status='submitted', limit=3, offset=3)]
+        statuses = list(lead_stages.HISTORY)
+        page1 = [l['id'] for l in db.list_leads(
+            status=statuses, limit=3, offset=0, order='finished')]
+        page2 = [l['id'] for l in db.list_leads(
+            status=statuses, limit=3, offset=3, order='finished')]
 
         self.assertEqual(page1, ids_newest_first[:3])
         self.assertEqual(page2, ids_newest_first[3:6])
 
-    def test_a_lead_with_no_email_falls_back_to_ingest_time(self):
-        # Spreadsheet rows have no message; they must still sort sensibly
+    def test_a_lead_with_no_finish_stamp_falls_back_to_when_it_was_parked(self):
+        # 'duplicate' and 'submission_unknown' have neither submitted_at nor a
+        # rejection stamp of their own; they must still sort somewhere sane
         # rather than sinking below everything or crashing the join.
-        emailed = self._reviewed_lead('emailed', '2026-08-01T09:00:00+00:00')
-        spreadsheet = db.insert_lead(
-            {'first_name': 'sheet', 'email': 'sheet@example.com'},
-            'excel', status='submitted',
-        )
+        stamped = self._submitted('stamped', '2026-08-01T09:00:00+00:00',
+                                  '2026-08-20T09:00:00+00:00')
+        unstamped = self._lead('unstamped', '2026-08-02T09:00:00+00:00',
+                               status='duplicate')
 
-        ordered = [l['id'] for l in db.list_leads(status='submitted')]
+        # Parked just now, so newer than the August 20th submission.
+        self.assertEqual(self._history_order(), [unstamped, stamped])
 
-        # Ingested just now, so newer than the August 1st email.
-        self.assertEqual(ordered, [spreadsheet, emailed])
+    def test_an_unknown_order_is_refused_rather_than_silently_ignored(self):
+        with self.assertRaises(ValueError):
+            db.list_leads(order='whatever')
 
     def test_the_history_page_renders_in_that_order(self):
-        self._reviewed_lead('older', '2026-08-01T09:00:00+00:00')
-        self._reviewed_lead('newer', '2026-08-10T09:00:00+00:00')
+        self._submitted('older', '2026-08-10T09:00:00+00:00',
+                        '2026-08-20T09:00:00+00:00')
+        self._submitted('newer', '2026-08-01T09:00:00+00:00',
+                        '2026-08-26T09:00:00+00:00')
 
         with patch('dashboard.app.db.get_lead_email_thread', return_value=[]):
             page = self.client.get('/history').get_data(as_text=True)
 
         self.assertLess(page.index('newer@example.com'), page.index('older@example.com'))
+
+    def test_the_column_the_page_shows_is_the_column_it_sorts_on(self):
+        # A page sorted on a date it does not display reads as unordered even
+        # when it is not: History showed reviewed_at, which is stamped when a
+        # reviewer stages a lead, not when the batch it rides out with goes.
+        self._submitted('older', '2026-08-01T09:00:00+00:00',
+                        '2026-08-20T11:00:00+00:00')
+        self._submitted('newer', '2026-08-02T09:00:00+00:00',
+                        '2026-08-26T11:00:00+00:00')
+
+        with patch('dashboard.app.db.get_lead_email_thread', return_value=[]):
+            page = self.client.get('/history').get_data(as_text=True)
+
+        shown = [
+            value.strip()
+            for value in re.findall(r'data-label="Finished">([^<]*)<', page)
+        ]
+        self.assertEqual(shown, ['2026-08-26 11:00', '2026-08-20 11:00'])
 
 
 class SortKeyTests(unittest.TestCase):
