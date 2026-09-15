@@ -629,7 +629,7 @@ class OracleLeadApiClient:
             )
         return result
 
-    def submit_lead(self, lead, trade_show_name, source_label='Tradeshow'):
+    def submit_lead(self, lead, trade_show_name, source_label='Tradeshow', bypass_dedup=False):
         # Look up the company/contact before creating anything. A lookup outage
         # is not evidence that the party does not exist, so it is allowed to
         # stop this attempt and be retried safely later.
@@ -650,56 +650,59 @@ class OracleLeadApiClient:
         )
         
         # --- Pre-submission Dedup Check against Oracle ---
-        try:
-            email = (lead.get('email') or '').strip()
-            # Single-quotes inside a value terminate the literal and make
-            # Oracle reject the whole query -- doubling them is the escape
-            # (O'Brien Medical is a realistic organization name). The query
-            # goes through params= so requests URL-encodes the spaces and
-            # ampersands a project name routinely contains.
-            queries = [f"Name='{_q_escape(project_name)}'"]
-            if email:
-                queries.append(f"PrimaryContactEmailAddress='{_q_escape(email)}'")
-            q_str = ' OR '.join(queries)
+        if bypass_dedup:
+            logger.info('Bypassing pre-submission dedup check against Oracle for project %s', project_name)
+        else:
+            try:
+                email = (lead.get('email') or '').strip()
+                # Single-quotes inside a value terminate the literal and make
+                # Oracle reject the whole query -- doubling them is the escape
+                # (O'Brien Medical is a realistic organization name). The query
+                # goes through params= so requests URL-encodes the spaces and
+                # ampersands a project name routinely contains.
+                queries = [f"Name='{_q_escape(project_name)}'"]
+                if email:
+                    queries.append(f"PrimaryContactEmailAddress='{_q_escape(email)}'")
+                q_str = ' OR '.join(queries)
 
-            check_resp = self.session.get(
-                self.leads_url,
-                params={'q': q_str},
-                auth=(self.username, self.password),
-                headers={'Accept': 'application/json'},
-                timeout=self.timeout,
-            )
-            if check_resp.status_code == 200:
-                existing_items = check_resp.json().get('items', [])
-                if existing_items:
-                    existing = existing_items[0]
-                    exist_id = existing.get('LeadId')
-                    exist_num = existing.get('LeadNumber')
-                    logger.warning('Duplicate lead found in Oracle (%s / %s). Skipping creation.', exist_num, exist_id)
-                    return {
-                        'success': True,
-                        'project_name': project_name,
-                        'oracle_record_id': str(exist_id or exist_num),
-                        'oracle_lead_number': exist_num,
-                        'field_warnings': warnings + [f'Lead already exists in Oracle ({exist_num})'],
-                        'response': existing,
-                    }
-            elif check_resp.status_code != 200:
-                raise OracleApiError(
-                    f'Oracle lead dedup lookup failed ({check_resp.status_code}): '
-                    f'{check_resp.text}', status_code=check_resp.status_code,
-                    response_text=check_resp.text,
+                check_resp = self.session.get(
+                    self.leads_url,
+                    params={'q': q_str},
+                    auth=(self.username, self.password),
+                    headers={'Accept': 'application/json'},
+                    timeout=self.timeout,
                 )
-        except OracleApiError:
-            raise
-        except requests.RequestException as check_err:
-            raise OracleApiError(
-                f'Oracle lead dedup lookup request failed: {check_err}'
-            ) from check_err
-        except (ValueError, AttributeError) as check_err:
-            raise OracleApiError(
-                f'Oracle lead dedup lookup returned invalid JSON: {check_err}'
-            ) from check_err
+                if check_resp.status_code == 200:
+                    existing_items = check_resp.json().get('items', [])
+                    if existing_items:
+                        existing = existing_items[0]
+                        exist_id = existing.get('LeadId')
+                        exist_num = existing.get('LeadNumber')
+                        logger.warning('Duplicate lead found in Oracle (%s / %s). Skipping creation.', exist_num, exist_id)
+                        return {
+                            'success': True,
+                            'project_name': project_name,
+                            'oracle_record_id': str(exist_id or exist_num),
+                            'oracle_lead_number': exist_num,
+                            'field_warnings': warnings + [f'Lead already exists in Oracle ({exist_num})'],
+                            'response': existing,
+                        }
+                elif check_resp.status_code != 200:
+                    raise OracleApiError(
+                        f'Oracle lead dedup lookup failed ({check_resp.status_code}): '
+                        f'{check_resp.text}', status_code=check_resp.status_code,
+                        response_text=check_resp.text,
+                    )
+            except OracleApiError:
+                raise
+            except requests.RequestException as check_err:
+                raise OracleApiError(
+                    f'Oracle lead dedup lookup request failed: {check_err}'
+                ) from check_err
+            except (ValueError, AttributeError) as check_err:
+                raise OracleApiError(
+                    f'Oracle lead dedup lookup returned invalid JSON: {check_err}'
+                ) from check_err
 
         description = payload.get('Description') or ''
         if len(description) > description_compactor.ORACLE_DESCRIPTION_MAX_LENGTH:

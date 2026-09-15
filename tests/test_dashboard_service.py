@@ -69,6 +69,10 @@ class SchedulerSetupTests(unittest.TestCase):
         self.assertIn('-MultipleInstances IgnoreNew', self.task_script)
         self.assertIn('-Minutes 10', self.task_script)
 
+    def test_dashboard_keeps_running_on_battery(self):
+        self.assertIn('-AllowStartIfOnBatteries', self.task_script)
+        self.assertIn('-DontStopIfGoingOnBatteries', self.task_script)
+
 
 if __name__ == '__main__':
     unittest.main()

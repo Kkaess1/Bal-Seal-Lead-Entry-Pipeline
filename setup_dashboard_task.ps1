@@ -18,6 +18,7 @@ $heartbeat = New-ScheduledTaskTrigger -Once -At (Get-Date).Date `
     -RepetitionInterval (New-TimeSpan -Minutes 10) `
     -RepetitionDuration (New-TimeSpan -Days 3650)
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
     -MultipleInstances IgnoreNew

@@ -340,6 +340,73 @@
     }
     .page-head h2 { margin: 0; }
 
+    /* Ingest Loading Bar Component */
+    .ingest-loading-container {
+      display: none;
+      margin: 0 0 var(--s-5) 0;
+      padding: var(--s-3) var(--s-4);
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      box-shadow: var(--shadow-sm);
+    }
+    .ingest-loading-container.active {
+      display: block;
+    }
+    .ingest-loading-header {
+      display: flex;
+      align-items: center;
+      gap: var(--s-3);
+      margin-bottom: var(--s-2);
+      font-size: var(--fs-sm);
+      font-weight: 600;
+      color: var(--text);
+    }
+    .ingest-spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--navy);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: ingest-spin 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes ingest-spin {
+      to { transform: rotate(360deg); }
+    }
+    .ingest-progress-bar-bg {
+      width: 100%;
+      height: 6px;
+      background: var(--surface-2);
+      border: 1px solid var(--border-hairline);
+      border-radius: var(--r-pill);
+      overflow: hidden;
+      position: relative;
+    }
+    .ingest-progress-bar-fill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: 35%;
+      background: linear-gradient(90deg, var(--navy), var(--clear-solid));
+      border-radius: var(--r-pill);
+      animation: ingest-shimmer 1.6s ease-in-out infinite alternate;
+    }
+    @keyframes ingest-shimmer {
+      0% {
+        left: 0%;
+        width: 25%;
+      }
+      50% {
+        width: 50%;
+      }
+      100% {
+        left: 75%;
+        width: 25%;
+      }
+    }
+
     /* =========================================================================
        FOCUS
        ========================================================================= */
@@ -417,6 +484,10 @@
       background: var(--surface-2); color: var(--text-muted); border-color: var(--border);
       font-weight: 500; cursor: help;
     }
+    .badge-flag-info { background: var(--clear-bg); color: var(--clear-fg); border-color: var(--clear-border); }
+    .badge-flag-caution { background: var(--review-bg); color: var(--review-fg); border-color: var(--review-border); }
+    .badge-flag-high { background: #fff7ed; color: #c2410c; border-color: #ffedd5; }
+    .badge-flag-critical { background: var(--reject-bg); color: var(--reject-fg); border-color: var(--reject-border); }
 
     /* =========================================================================
        BUTTONS
@@ -509,6 +580,23 @@
     table.lead-table td.details-cell {
       white-space: pre-line; line-height: 1.6;
       max-width: 600px; word-break: break-word; overflow-wrap: anywhere;
+    }
+
+    .history-header {
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: var(--s-3); margin-bottom: var(--s-4);
+    }
+    .history-header h2 { margin: 0; }
+    .history-search {
+      display: flex; align-items: center; gap: var(--s-2); margin: 0;
+    }
+    .history-search input[type="search"] {
+      width: 300px; max-width: 100%;
+    }
+    .history-search a.btn-secondary {
+      display: inline-flex; align-items: center; text-decoration: none;
+      height: var(--control-h-sm); line-height: var(--control-h-sm);
+      font-size: var(--fs-cap); padding: 0 var(--s-3); white-space: nowrap;
     }
 
     .history-wrap { padding: var(--s-2) var(--s-1); overflow-x: auto; }
@@ -1373,6 +1461,14 @@
                     {%- if alert.organization %} &mdash; {{ alert.organization }}{% endif %}
                   </div>
                   <div class="detail">{{ alert.detail }}</div>
+                  {% if alert.can_send_anyway %}
+                    <div style="margin-top: 0.35rem;">
+                      <form method="post" action="{{ url_for('send_anyway', lead_id=alert.lead_id) }}" style="margin:0; display:inline;">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="btn btn-secondary btn-inline" style="padding: 0.25rem 0.6rem; font-size: 0.78rem; font-weight: 600; color: var(--accent);">Send anyway</button>
+                      </form>
+                    </div>
+                  {% endif %}
                 </div>
                 <form method="post" action="{{ url_for('dismiss_alert', lead_id=alert.lead_id) }}" style="margin:0;">
                   <button type="submit" class="bell-dismiss" title="Dismiss">&times;</button>

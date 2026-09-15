@@ -5,6 +5,7 @@ Plain sqlite3, no ORM — mirrors the flat function-based style of excel_parser.
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -120,6 +121,7 @@ def init_db(db_path=None):
                 oracle_payload         TEXT,
                 field_warnings         TEXT,
                 alert_dismissed_at     TEXT,
+                force_submit           INTEGER NOT NULL DEFAULT 0,
 
                 created_at             TEXT NOT NULL,
                 updated_at             TEXT NOT NULL
@@ -304,6 +306,10 @@ def _migrate_leads_columns(conn):
     if 'submission_attempt_count' not in existing:
         conn.execute(
             'ALTER TABLE leads ADD COLUMN submission_attempt_count INTEGER NOT NULL DEFAULT 0'
+        )
+    if 'force_submit' not in existing:
+        conn.execute(
+            'ALTER TABLE leads ADD COLUMN force_submit INTEGER NOT NULL DEFAULT 0'
         )
     conn.execute(
         'CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_ingest_key '
@@ -857,7 +863,7 @@ LEAD_ORDERS = {
 }
 
 
-def list_leads(status=None, conn=None, limit=None, offset=0, order='received'):
+def list_leads(status=None, conn=None, limit=None, offset=0, order='received', query=None):
     """
     List leads, optionally filtered and paginated. `order` is a key of
     LEAD_ORDERS; the default puts the most recently received email first, the
@@ -893,11 +899,22 @@ def list_leads(status=None, conn=None, limit=None, offset=0, order='received'):
         # id/subject/received_at columns into the lead dict and shadow them.
         sql = ('SELECT l.* FROM leads l '
                'LEFT JOIN messages m ON m.id = l.message_id')
+        conditions = []
         if status is not None:
             statuses = [status] if isinstance(status, str) else list(status)
             placeholders = ', '.join('?' for _ in statuses)
-            sql += f' WHERE l.status IN ({placeholders})'
+            conditions.append(f'l.status IN ({placeholders})')
             params.extend(statuses)
+        if query and query.strip():
+            term = f'%{query.strip()}%'
+            conditions.append(
+                "(l.first_name LIKE ? OR l.last_name LIKE ? OR "
+                "(l.first_name || ' ' || l.last_name) LIKE ? OR "
+                "l.organization LIKE ? OR l.email LIKE ?)"
+            )
+            params.extend([term] * 5)
+        if conditions:
+            sql += ' WHERE ' + ' AND '.join(conditions)
         try:
             sql += f' ORDER BY {LEAD_ORDERS[order]}'
         except KeyError:
@@ -915,17 +932,29 @@ def list_leads(status=None, conn=None, limit=None, offset=0, order='received'):
             conn.close()
 
 
-def count_leads(status=None, conn=None):
+def count_leads(status=None, query=None, conn=None):
     owns_conn = conn is None
     conn = conn or get_connection()
     try:
-        if status is None:
-            return conn.execute('SELECT COUNT(*) FROM leads').fetchone()[0]
-        statuses = [status] if isinstance(status, str) else list(status)
-        placeholders = ', '.join('?' for _ in statuses)
-        return conn.execute(
-            f'SELECT COUNT(*) FROM leads WHERE status IN ({placeholders})', statuses
-        ).fetchone()[0]
+        params = []
+        conditions = []
+        if status is not None:
+            statuses = [status] if isinstance(status, str) else list(status)
+            placeholders = ', '.join('?' for _ in statuses)
+            conditions.append(f'status IN ({placeholders})')
+            params.extend(statuses)
+        if query and query.strip():
+            term = f'%{query.strip()}%'
+            conditions.append(
+                "(first_name LIKE ? OR last_name LIKE ? OR "
+                "(first_name || ' ' || last_name) LIKE ? OR "
+                "organization LIKE ? OR email LIKE ?)"
+            )
+            params.extend([term] * 5)
+        sql = 'SELECT COUNT(*) FROM leads'
+        if conditions:
+            sql += ' WHERE ' + ' AND '.join(conditions)
+        return conn.execute(sql, params).fetchone()[0]
     finally:
         if owns_conn:
             conn.close()
@@ -1672,7 +1701,7 @@ def mark_lead_submitted(lead_id, oracle_project_name, oracle_record_id=None,
         'status': 'submitted', 'submitted_at': _now(),
         'oracle_project_name': oracle_project_name,
         'submitting_started_at': None, 'next_attempt_at': None,
-        'submit_error': None,
+        'submit_error': None, 'force_submit': 0,
     }
     if oracle_record_id:
         fields['oracle_record_id'] = str(oracle_record_id)
@@ -1691,6 +1720,25 @@ def mark_lead_submitted(lead_id, oracle_project_name, oracle_record_id=None,
         # one on this lead was already dismissed.
         fields['alert_dismissed_at'] = None
     update_lead_fields(lead_id, fields, conn=conn)
+
+
+def mark_lead_for_force_submit(lead_id, conn=None):
+    """
+    Mark a lead to force submission to Oracle, bypassing duplicate checks.
+    Puts it back into 'approved' status and sets force_submit=1.
+    """
+    update_lead_fields(
+        lead_id,
+        {
+            'status': 'approved',
+            'force_submit': 1,
+            'submitting_started_at': None,
+            'next_attempt_at': None,
+            'submit_error': None,
+            'alert_dismissed_at': _now(),
+        },
+        conn=conn,
+    )
 
 
 def mark_lead_duplicate_of_submitted(lead_id, prior_lead, detail, conn=None):
@@ -2303,8 +2351,16 @@ def acquire_run_lease(key, stale_minutes=90, conn=None):
             if updated.tzinfo is None:
                 updated = updated.replace(tzinfo=timezone.utc)
             if state.get('status') in ('starting', 'running') and updated >= cutoff:
-                conn.rollback()
-                return None
+                # Background jobs record their PID as soon as Popen succeeds.
+                # A forced Task Scheduler shutdown cannot run the job's
+                # finally/except cleanup, so the durable lease can otherwise
+                # claim "running" for 90 minutes after its process is gone.
+                # Recover that orphan immediately while retaining the age
+                # cutoff as a fallback for older leases that have no PID.
+                pid = state.get('pid')
+                if not pid or _process_is_running(pid):
+                    conn.rollback()
+                    return None
 
         token = secrets.token_urlsafe(24)
         now = _now()
@@ -2322,7 +2378,39 @@ def acquire_run_lease(key, stale_minutes=90, conn=None):
             conn.close()
 
 
-def update_run_lease(key, token, status, detail=None, conn=None):
+def _process_is_running(pid):
+    """Return whether *pid* still names a process, without signalling it."""
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if os.name == 'nt':
+        # Unlike POSIX, Windows Python may pass signal 0 to TerminateProcess;
+        # os.kill(pid, 0) is therefore not a safe liveness probe here.
+        import ctypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        process_query_limited_information = 0x1000
+        handle = kernel32.OpenProcess(
+            process_query_limited_information, False, pid,
+        )
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        # Access denied proves that a process owns the PID even though this
+        # account cannot open it. Invalid/not-found PIDs return other errors.
+        return ctypes.get_last_error() == 5
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OSError):
+        return False
+    return True
+
+
+def update_run_lease(key, token, status, detail=None, pid=None, conn=None):
     """Update a lease only when its unguessable token still owns the job."""
     owns_conn = conn is None
     conn = conn or get_connection()
@@ -2336,8 +2424,11 @@ def update_run_lease(key, token, status, detail=None, conn=None):
             return False
         state['status'] = status
         state['detail'] = detail
+        if pid is not None:
+            state['pid'] = int(pid)
         if status in ('succeeded', 'failed'):
             state['finished_at'] = _now()
+            state.pop('pid', None)
         now = _now()
         conn.execute(
             'UPDATE run_state SET value = ?, updated_at = ? WHERE key = ?',
@@ -2357,6 +2448,48 @@ def get_run_lease(key, conn=None):
         return json.loads(raw) if raw else None
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def run_lease_process_is_running(key, conn=None):
+    """Whether a named job lease points at a worker process that still exists."""
+    state = get_run_lease(key, conn=conn) or {}
+    return (
+        state.get('status') in ('starting', 'running')
+        and bool(state.get('pid'))
+        and _process_is_running(state['pid'])
+    )
+
+
+def reset_orphaned_run_lease(key, detail='Reset by operator', conn=None):
+    """Mark an active lease failed, but never unlock a live worker."""
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT value FROM run_state WHERE key = ?', (key,)
+        ).fetchone()
+        try:
+            state = json.loads(row['value']) if row else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            state = {}
+        if state.get('status') not in ('starting', 'running'):
+            conn.rollback()
+            return False
+        if state.get('pid') and _process_is_running(state['pid']):
+            conn.rollback()
+            return False
+        state.update(status='failed', detail=detail, finished_at=_now())
+        state.pop('pid', None)
+        conn.execute(
+            'UPDATE run_state SET value = ?, updated_at = ? WHERE key = ?',
+            (json.dumps(state), _now(), key),
+        )
+        conn.commit()
+        return True
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 

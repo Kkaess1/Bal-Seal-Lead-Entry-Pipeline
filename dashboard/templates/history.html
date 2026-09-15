@@ -1,9 +1,22 @@
 {% extends 'base.html' %}
 {% block title %}History{% endblock %}
 {% block content %}
-  <h2>History ({{ total }})</h2>
+  <div class="history-header">
+    <h2>History ({{ total }})</h2>
+    <form class="history-search" method="get" action="{{ url_for('history') }}">
+      <input type="search" name="q" value="{{ query or '' }}" placeholder="Search by name or organization..." aria-label="Search history leads">
+      <button class="btn-secondary" type="submit">Search</button>
+      {% if query %}
+        <a class="btn-secondary" href="{{ url_for('history') }}">Clear</a>
+      {% endif %}
+    </form>
+  </div>
   {% if not leads %}
-    <p class="empty">Nothing here yet.</p>
+    {% if query %}
+      <p class="empty">No leads found matching "{{ query }}". <a href="{{ url_for('history') }}">Clear search</a></p>
+    {% else %}
+      <p class="empty">Nothing here yet.</p>
+    {% endif %}
   {% else %}
     <div class="card history-wrap">
       <table class="history-table">
@@ -43,7 +56,14 @@
                      rather than repeated here -- a page offering a button the
                      route refuses, or withholding one it allows, is how a lead
                      ends up with no way back. #}
-                  {% if lead.status in returnable_statuses %}
+                  {% if lead.status == 'duplicate' or lead.duplicate_of_lead_id or ('already exists' in (lead.field_warnings or '')) %}
+                    <form method="post" action="{{ url_for('send_anyway', lead_id=lead.id) }}">
+                      <button type="submit" class="btn-approve">Send anyway</button>
+                    </form>
+                    <form method="post" action="{{ url_for('restore', lead_id=lead.id) }}">
+                      <button type="submit" class="btn-secondary">Return to Review</button>
+                    </form>
+                  {% elif lead.status in returnable_statuses %}
                     <form method="post" action="{{ url_for('restore', lead_id=lead.id) }}">
                       <button type="submit" class="btn-secondary">Return to Review</button>
                     </form>
@@ -64,9 +84,9 @@
     </div>
     {% if pages > 1 %}
       <nav class="pagination" aria-label="History pages">
-        {% if page > 1 %}<a class="btn-secondary" href="{{ url_for('history', page=page-1) }}">Previous</a>{% endif %}
+        {% if page > 1 %}<a class="btn-secondary" href="{{ url_for('history', page=page-1, q=query if query else None) }}">Previous</a>{% endif %}
         <span>Page {{ page }} of {{ pages }}</span>
-        {% if page < pages %}<a class="btn-secondary" href="{{ url_for('history', page=page+1) }}">Next</a>{% endif %}
+        {% if page < pages %}<a class="btn-secondary" href="{{ url_for('history', page=page+1, q=query if query else None) }}">Next</a>{% endif %}
       </nav>
     {% endif %}
   {% endif %}

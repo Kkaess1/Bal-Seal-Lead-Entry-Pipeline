@@ -527,8 +527,8 @@ class RunApiSubmitTests(unittest.TestCase):
         client = _mock_client(status_code=201, json_body={'LeadId': 7, 'LeadNumber': 'LN-7'})
         original_submit = client.submit_lead
 
-        def submit_with_warning(lead, trade_show, source_label='Tradeshow'):
-            r = original_submit(lead, trade_show, source_label=source_label)
+        def submit_with_warning(lead, trade_show, source_label='Tradeshow', **kwargs):
+            r = original_submit(lead, trade_show, source_label=source_label, **kwargs)
             r['field_warnings'] = ['No verified API value for market "UNKNOWN_MARKET"']
             return r
 
@@ -1280,6 +1280,109 @@ class DedupQueryEscapingTests(unittest.TestCase):
         q = session.get.call_args.kwargs['params']['q']
         self.assertIn("O''BRIEN MEDICAL", q)
         self.assertNotIn("'O'B", q)
+
+
+class SendAnywayTests(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        self._tmp.close()
+        db.DB_PATH = Path(self._tmp.name)
+        db.init_db()
+
+    def tearDown(self):
+        try:
+            Path(self._tmp.name).unlink()
+        except OSError:
+            pass
+
+    def test_mark_lead_for_force_submit(self):
+        prior_id = db.insert_lead({'first_name': 'Prior', 'organization': 'PriorOrg'}, source='manual_entry')
+        db.mark_lead_submitted(prior_id, 'PriorProject', oracle_record_id='REC-99')
+        prior = db.get_lead(prior_id)
+
+        lead_id = db.insert_lead({'first_name': 'Jane', 'organization': 'Acme'}, source='manual_entry')
+        db.mark_lead_duplicate_of_submitted(lead_id, prior, 'Duplicate test')
+        lead = db.get_lead(lead_id)
+        self.assertEqual(lead['status'], 'duplicate')
+
+        db.mark_lead_for_force_submit(lead_id)
+        updated = db.get_lead(lead_id)
+        self.assertEqual(updated['status'], 'approved')
+        self.assertEqual(updated['force_submit'], 1)
+        self.assertIsNotNone(updated['alert_dismissed_at'])
+
+    def test_send_anyway_route(self):
+        from dashboard.app import app
+        app.config['TESTING'] = True
+        prior_id = db.insert_lead({'first_name': 'Prior', 'organization': 'PriorOrg'}, source='manual_entry')
+        db.mark_lead_submitted(prior_id, 'PriorProject', oracle_record_id='REC-99')
+        prior = db.get_lead(prior_id)
+
+        lead_id = db.insert_lead({'first_name': 'Jane', 'organization': 'Acme'}, source='manual_entry')
+        db.mark_lead_duplicate_of_submitted(lead_id, prior, 'Duplicate test')
+
+        with app.test_client() as client:
+            with client.session_transaction() as s:
+                s['_csrf_token'] = 'token'
+            with patch('dashboard.app._start_submit_run', return_value=True):
+                res = client.post(f'/leads/{lead_id}/send-anyway', data={'_csrf_token': 'token'}, follow_redirects=False)
+                self.assertEqual(res.status_code, 302)
+
+        updated = db.get_lead(lead_id)
+        self.assertEqual(updated['status'], 'approved')
+        self.assertEqual(updated['force_submit'], 1)
+
+    def test_force_submit_bypasses_local_duplicate_check(self):
+        lead_data = {
+            'first_name': 'Jane', 'last_name': 'Doe', 'email': 'dup@example.com',
+            'organization': 'Test Corp', 'country': 'United States', 'state': 'CA',
+            'assigned_tm': 'Bill Rost',
+        }
+        # First lead already submitted
+        lead1_id = db.insert_lead(lead_data, source='manual_entry')
+        db.mark_lead_submitted(lead1_id, 'Project1', oracle_record_id='REC-1')
+
+        # Second lead with same dedup_key, flagged force_submit
+        lead2_id = db.insert_lead(lead_data, source='manual_entry')
+        db.mark_lead_for_force_submit(lead2_id)
+
+        client = _mock_client(status_code=201, json_body={'LeadId': 42, 'LeadNumber': 'LN-42'})
+        leads = db.list_ready_for_submission()
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0]['id'], lead2_id)
+
+        results = pipeline_submit._run_api_submit(client, leads)
+        self.assertEqual(results['ok'], 1)
+        lead2 = db.get_lead(lead2_id)
+        self.assertEqual(lead2['status'], 'submitted')
+        self.assertEqual(lead2['force_submit'], 0)
+
+    def test_oracle_api_bypass_dedup_skips_get_lookup(self):
+        session = MagicMock()
+        empty_lookup = _resp(200)
+        empty_lookup.json.return_value = {'items': []}
+        session.get.return_value = empty_lookup
+        session.post.return_value = _resp(201, '')
+        session.post.return_value.json.return_value = {'LeadId': 100}
+        client = oracle_api.OracleLeadApiClient(
+            {'base_url': 'https://fake.oracle.example', 'api_timeout_seconds': 10},
+            username='u', password='p', session=session,
+        )
+
+        res = client.submit_lead(
+            {'organization': 'Test Org', 'email': 'test@example.com', 'country': 'United States'},
+            'Website/Email', source_label='Inquiry', bypass_dedup=True
+        )
+
+        # session.get may be called by resolve_existing_party (party lookup), but not for pre-submission dedup (leads endpoint)
+        get_calls = session.get.call_args_list
+        leads_dedup_calls = [
+            c for c in get_calls if 'leads' in c[0][0] and 'q' in c.kwargs.get('params', {})
+        ]
+        self.assertEqual(len(leads_dedup_calls), 0)
+        session.post.assert_called_once()
+        self.assertEqual(res['oracle_record_id'], '100')
 
 
 if __name__ == '__main__':

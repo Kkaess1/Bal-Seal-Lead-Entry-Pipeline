@@ -53,6 +53,9 @@ _PLAUSIBILITY_LABELS = {
     'no_engineering_specs': 'No engineering specs',
     'gibberish_content': 'Gibberish/bot-generated content',
     'other_concern': 'Other plausibility concern',
+    'phishing': 'Likely phishing message',
+    'impersonation': 'Possible sender impersonation',
+    'payment_fraud': 'Possible payment fraud',
 }
 
 # Only what the field name does not already say. A description is spent on
@@ -217,6 +220,9 @@ First decide:
 3. source_language -- the primary language of the sender's new message, common English
    name (English, German, Japanese...). Ignore quoted older messages.
 
+Security-check credential/login lures, deceptive links, impersonation, urgent bank
+changes, wire/payment diversion, and gift-card requests even when they resemble sales.
+
 Return ONLY this JSON, no text outside it:
 {{
   "is_lead": true or false,
@@ -228,7 +234,7 @@ Return ONLY this JSON, no text outside it:
   "plausibility": {{
     "fraud_risk": "clear" or "review" or "reject",
     "reasons": [
-      {{"tag": "poor_spelling" or "no_engineering_specs" or "gibberish_content" or "other_concern",
+      {{"tag": "poor_spelling" or "no_engineering_specs" or "gibberish_content" or "other_concern" or "phishing" or "impersonation" or "payment_fraud",
         "detail": "one short sentence"}}
     ]
   }},

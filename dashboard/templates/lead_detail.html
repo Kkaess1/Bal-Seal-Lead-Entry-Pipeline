@@ -166,7 +166,20 @@
         {% if lead.reviewed_by or lead.reviewed_at %}
           <p class="meta" style="margin: 0.25rem 0;">Reviewed by <strong>{{ lead.reviewed_by or 'dashboard' }}</strong> {% if lead.reviewed_at %}on {{ lead.reviewed_at }}{% endif %}</p>
         {% endif %}
-        {% if lead.status in ('rejected', 'failed') %}
+        {% if lead.status == 'duplicate' or lead.duplicate_of_lead_id or ('already exists' in (lead.field_warnings or '')) %}
+          <div style="margin-top: 1rem;">
+            <p class="meta" style="margin: 0 0 0.5rem;">
+              This lead was flagged as a duplicate. If this is an edge case and should be submitted to Oracle anyway, click below.
+            </p>
+            <form method="post" action="{{ url_for('send_anyway', lead_id=lead.id) }}" style="display:inline;">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="btn-approve">Send anyway</button>
+            </form>
+            <form method="post" action="{{ url_for('restore', lead_id=lead.id) }}" style="display:inline; margin-left: 0.5rem;">
+              <button type="submit" class="btn-secondary">Return to Pending Review</button>
+            </form>
+          </div>
+        {% elif lead.status in ('rejected', 'failed') %}
           <div style="margin-top: 1rem;">
             <form method="post" action="{{ url_for('restore', lead_id=lead.id) }}" style="display:inline;">
               <button type="submit" class="btn-secondary">Return to Pending Review</button>

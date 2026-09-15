@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -214,6 +215,52 @@ class ManualIngestRouteTests(unittest.TestCase):
 
         popen.assert_called_once()
         self.assertIn(b'already going', self.client.get(response.location).data)
+
+    @patch('subprocess.Popen')
+    def test_dead_worker_pid_is_recovered_on_next_click(self, popen):
+        token = db.acquire_run_lease('job:manual_ingest')
+        db.update_run_lease(
+            'job:manual_ingest', token, 'running', pid=2147483647,
+        )
+
+        self._post()
+
+        popen.assert_called_once()
+
+    @patch('subprocess.Popen')
+    def test_live_worker_pid_still_blocks_a_second_run(self, popen):
+        token = db.acquire_run_lease('job:manual_ingest')
+        db.update_run_lease(
+            'job:manual_ingest', token, 'running', pid=os.getpid(),
+        )
+
+        response = self._post()
+
+        popen.assert_not_called()
+        self.assertIn(b'already going', self.client.get(response.location).data)
+
+    def test_reset_button_clears_only_an_orphaned_run(self):
+        token = db.acquire_run_lease('job:manual_ingest')
+        db.update_run_lease(
+            'job:manual_ingest', token, 'running', pid=2147483647,
+        )
+
+        response = self.client.post(
+            '/ingest/reset', data={'_csrf_token': 'token'},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(db.get_run_lease('job:manual_ingest')['status'], 'failed')
+
+    def test_reset_button_refuses_to_unlock_a_live_worker(self):
+        token = db.acquire_run_lease('job:manual_ingest')
+        db.update_run_lease(
+            'job:manual_ingest', token, 'running', pid=os.getpid(),
+        )
+
+        self.client.post('/ingest/reset', data={'_csrf_token': 'token'})
+
+        self.assertEqual(db.get_run_lease('job:manual_ingest')['status'], 'running')
 
     @patch('subprocess.Popen')
     def test_a_run_from_long_ago_does_not_block_a_new_one(self, popen):

@@ -23,6 +23,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 import company_website
+import attachment_security
 import db
 import email_cleaner
 import email_translator
@@ -109,7 +110,8 @@ def _export_message_file(msg, existing_row=None):
 
 
 def _screen_and_stage(lead_id, lead, sender_email, subject=None, is_followup=False,
-                      followup_reason=None, precomputed_llm_result=None):
+                      followup_reason=None, precomputed_llm_result=None,
+                      body_text=None, attachments=None, attachment_scan=None):
     """Territory assignment + fraud screening for a lead that's already been
     inserted. All leads are staged in pending_review so the human user can review them."""
     tm, basis = territory_map.assign_tm(lead)
@@ -121,6 +123,8 @@ def _screen_and_stage(lead_id, lead, sender_email, subject=None, is_followup=Fal
         lead, sender_email=sender_email, subject=subject,
         is_followup=is_followup, followup_reason=followup_reason,
         precomputed_llm_result=precomputed_llm_result,
+        body_text=body_text, attachments=attachments,
+        attachment_scan=attachment_scan,
     )
     risk_level = 'reject' if result['auto_reject'] else result['fraud_risk']
     db.set_fraud_screen_result(lead_id, risk_level, result['fraud_reasons'], result['fraud_score'])
@@ -154,7 +158,8 @@ def _fill_market(lead):
     return lead
 
 
-def _process_excel_attachment(message_row_id, path, sender_email, subject=None, force=False):
+def _process_excel_attachment(message_row_id, path, sender_email, subject=None, force=False,
+                              body_text=None, attachments=None, attachment_scan=None):
     """Spreadsheet attached to a Sales inbox email -- one lead per row, parsed
     by excel_parser.py."""
     rows = excel_parser.parse_excel(path)
@@ -170,11 +175,14 @@ def _process_excel_attachment(message_row_id, path, sender_email, subject=None, 
                                   source_row_number=row.get('row_number'),
                                   ingest_key=ingest_key,
                                   replace_existing=force)
-        _screen_and_stage(lead_id, row, sender_email, subject=subject)
+        _screen_and_stage(
+            lead_id, row, sender_email, subject=subject, body_text=body_text,
+            attachments=attachments, attachment_scan=attachment_scan,
+        )
     return len(rows)
 
 
-def _process_body_text(message_row_id, msg, force=False):
+def _process_body_text(message_row_id, msg, force=False, attachment_scan=None):
     """AI-extraction path for messages without an Excel attachment.
     Always inserts a lead record so every email is visible on the dashboard for human review."""
     # Compacted, not cleaned: strips tracking URLs, banners, disclaimers and
@@ -249,6 +257,8 @@ def _process_body_text(message_row_id, msg, force=False):
         is_followup=extraction.get('is_followup', False),
         followup_reason=extraction.get('followup_reason'),
         precomputed_llm_result=extraction.get('plausibility'),
+        body_text=msg.get('body_text'), attachments=msg.get('attachments'),
+        attachment_scan=attachment_scan,
     )
 
 
@@ -324,6 +334,16 @@ def process_message(msg, force=False, ingest_batch_id=None):
         if force:
             db.update_message_status(message_row_id, 'error', 'Forced reprocessing requested')
 
+    attachment_scan = None
+    if msg.get('attachments'):
+        attachment_scan = attachment_security.scan_file(message_file_path)
+        if attachment_scan.get('status') == 'malicious':
+            logger.error('  Microsoft Defender detected malicious attachment content in %r.',
+                         msg.get('subject'))
+        elif attachment_scan.get('status') in ('error', 'unavailable'):
+            logger.warning('  Attachment malware scan unavailable for %r: %s',
+                           msg.get('subject'), attachment_scan.get('detail'))
+
     if not db.claim_message(message_row_id):
         return db.get_message(message_row_id).get('status') == 'processed'
 
@@ -335,11 +355,16 @@ def process_message(msg, force=False, ingest_batch_id=None):
                 _process_excel_attachment(
                     message_row_id, path, msg['sender_email'],
                     subject=msg.get('subject'), force=force,
+                    body_text=msg.get('body_text'), attachments=msg.get('attachments'),
+                    attachment_scan=attachment_scan,
                 )
                 handled_as_excel = True
 
         if not handled_as_excel:
-            _process_body_text(message_row_id, msg, force=force)
+            _process_body_text(
+                message_row_id, msg, force=force,
+                attachment_scan=attachment_scan,
+            )
 
         db.update_message_status(message_row_id, 'processed')
         _capture_thread_context(msg)
@@ -437,7 +462,7 @@ def retry_pending_messages():
     return all_ok
 
 
-def _run_ingest():
+def _run_ingest(recover_orphaned_claims=False):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--recent', type=int, default=None, metavar='N',
@@ -458,7 +483,13 @@ def _run_ingest():
 
     # Recover work that was fetched and stored by an earlier run but never
     # completed. This includes rows that predate the durable-watermark change.
-    recovered = db.release_stale_message_claims()
+    # A dashboard-launched run owns the exclusive ingest lease. Once that
+    # lease has been acquired, no live ingestion can own a `processing` row,
+    # so recover every leftover claim immediately. CLI runs have no such
+    # guarantee and retain the conservative 90-minute cutoff.
+    recovered = db.release_stale_message_claims(
+        max_age_minutes=0 if recover_orphaned_claims else 90,
+    )
     if recovered:
         logger.warning(f'Recovered {recovered} stale message-processing claim(s).')
     retry_pending_messages()
@@ -499,9 +530,11 @@ def _run_ingest():
 def main():
     lease_token = os.getenv('PIPELINE_INGEST_LEASE_TOKEN')
     if lease_token:
-        db.update_run_lease('job:manual_ingest', lease_token, 'running')
+        db.update_run_lease(
+            'job:manual_ingest', lease_token, 'running', pid=os.getpid(),
+        )
     try:
-        _run_ingest()
+        _run_ingest(recover_orphaned_claims=bool(lease_token))
     except BaseException as exc:
         if lease_token:
             db.update_run_lease(

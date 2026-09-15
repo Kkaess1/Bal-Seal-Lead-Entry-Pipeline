@@ -1,27 +1,27 @@
 """
 Fraud/validity screening for candidate leads.
 
-Two layers, deliberately kept separate:
+Three layers, deliberately kept separate:
   1. Rule-based checks (deterministic, free, run first). Can set auto_reject=True,
      but ONLY for unambiguous junk. This is the sole path that skips human review;
      everything else always lands in pending_review for a person to decide.
-  2. An LLM plausibility pass (OpenAI). Adds labeled reasons and an advisory
+  2. Attachment checks classify dangerous names/types and consume the result of
+     an on-disk Microsoft Defender scan of the preserved Outlook message.
+  3. An LLM plausibility/security pass (OpenAI). Adds labeled reasons and an advisory
      fraud_risk badge (clear/review/reject). It NEVER sets auto_reject itself --
      its "reject" verdict is just a strong visual flag in the dashboard, not a
      decision. This split is the core defense against prompt injection: nothing
      the email content can make the model say is capable of skipping human review.
 
-Covers Keaton's four confirmed red flags, each reported as its own labeled reason
-(never folded into one opaque score) so the dashboard shows *why* at a glance:
-  - personal/free email domain   (rule-based)
-  - poor spelling/grammar        (LLM)
-  - no engineering specs         (LLM)
-  - gibberish/bot-generated content (rule-based pre-filter + LLM)
+Every reason carries a visible security severity: informational (gray), caution
+(yellow), high concern (orange), or critical (red). Free consumer email is only
+informational; phishing and malicious/active-code attachments are critical.
 """
 
 import json
 import os
 import re
+from pathlib import Path
 
 import ai_provider
 import secrets_store
@@ -47,6 +47,42 @@ SPAM_PHRASES = [
     'click here', 'buy now', 'limited time', 'act now', 'amazing deal',
     'work from home', 'you have won', 'congratulations you', 'viagra', 'crypto investment',
 ]
+
+_CRITICAL_ATTACHMENT_EXTENSIONS = {
+    '.ade', '.adp', '.app', '.bat', '.cmd', '.com', '.cpl', '.dll', '.exe',
+    '.gadget', '.hta', '.inf', '.ins', '.isp', '.jar', '.js', '.jse', '.lnk',
+    '.msc', '.msi', '.msp', '.mst', '.pif', '.ps1', '.reg', '.scr', '.sct',
+    '.shb', '.sys', '.vb', '.vbe', '.vbs', '.ws', '.wsc', '.wsf', '.wsh',
+    '.docm', '.dotm', '.xlsm', '.xltm', '.xlam', '.pptm', '.potm', '.ppam',
+    '.ppsm', '.sldm',
+}
+_HIGH_ATTACHMENT_EXTENSIONS = {
+    '.7z', '.ace', '.arj', '.cab', '.gz', '.img', '.iso', '.rar', '.tar',
+    '.zip', '.htm', '.html', '.mht', '.mhtml', '.svg', '.one', '.chm',
+}
+_DECOY_ATTACHMENT_EXTENSIONS = {
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.jpg',
+    '.jpeg', '.png', '.txt', '.rtf',
+}
+
+_PHISHING_CREDENTIAL_RE = re.compile(
+    r'\b(?:verify|validate|confirm|restore|unlock|update|re-?activate)\b.{0,60}'
+    r'\b(?:account|password|credentials?|mailbox|login|sign[ -]?in|mfa)\b',
+    re.IGNORECASE | re.DOTALL,
+)
+_PHISHING_ACTION_RE = re.compile(
+    r'\b(?:click|open|follow|visit|sign[ -]?in|log[ -]?in)\b.{0,45}'
+    r'\b(?:link|portal|account|document|attachment|here|below)\b',
+    re.IGNORECASE | re.DOTALL,
+)
+_PHISHING_PAYMENT_RE = re.compile(
+    r'\b(?:wire transfer|bank details?|payment instructions?|gift cards?|'
+    r'routing number|beneficiary)\b', re.IGNORECASE,
+)
+_URGENCY_RE = re.compile(
+    r'\b(?:urgent|immediately|within 24 hours|final warning|suspended|expires? today|'
+    r'action required)\b', re.IGNORECASE,
+)
 
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
@@ -94,12 +130,63 @@ _QUOTE_THREAD_RE = re.compile(r'(?:From:\s*.+\n(?:\s*(?:Sent|Date|To|Cc|Bcc):\s*
 _BALSEAL_DOMAINS = {'balseal.com', 'bse-web.com'}
 
 
-def rule_based_screen(lead, sender_email=None, subject=None):
+def _security_reason(tag, label, detail, severity):
+    return {'tag': tag, 'label': label, 'detail': detail, 'severity': severity}
+
+
+def _attachment_reasons(attachments, attachment_scan=None):
+    reasons = []
+    for attachment in attachments or []:
+        name = str((attachment or {}).get('name') or '').strip()
+        if not name:
+            continue
+        # Path.suffixes catches a decoy
+        # like invoice.pdf.exe while preserving the sender-visible name.
+        suffixes = [suffix.lower() for suffix in Path(name).suffixes]
+        final = suffixes[-1] if suffixes else ''
+        disguised = final in _CRITICAL_ATTACHMENT_EXTENSIONS and any(
+            suffix in _DECOY_ATTACHMENT_EXTENSIONS for suffix in suffixes[:-1]
+        )
+        if disguised:
+            reasons.append(_security_reason(
+                'disguised_executable_attachment', 'Disguised executable attachment',
+                f'{name} uses a document/image extension before an executable extension.',
+                'critical',
+            ))
+        elif final in _CRITICAL_ATTACHMENT_EXTENSIONS:
+            reasons.append(_security_reason(
+                'dangerous_attachment', 'Dangerous attachment type',
+                f'{name} can contain or execute active code.', 'critical',
+            ))
+        elif final in _HIGH_ATTACHMENT_EXTENSIONS:
+            reasons.append(_security_reason(
+                'suspicious_attachment', 'Attachment needs caution',
+                f'{name} is an archive, disk image, or active-content document.', 'high',
+            ))
+
+    scan = attachment_scan or {}
+    if scan.get('status') == 'malicious':
+        reasons.append(_security_reason(
+            'malicious_attachment', 'Malware detected in attachment',
+            str(scan.get('detail') or 'Microsoft Defender detected malicious content.')[:600],
+            'critical',
+        ))
+    elif attachments and scan.get('status') in ('error', 'unavailable'):
+        reasons.append(_security_reason(
+            'attachment_scan_unavailable', 'Attachment malware scan unavailable',
+            str(scan.get('detail') or 'The attachment could not be scanned.')[:600],
+            'caution',
+        ))
+    return reasons
+
+
+def rule_based_screen(lead, sender_email=None, subject=None, body_text=None,
+                      attachments=None, attachment_scan=None):
     """
     Returns (auto_reject: bool, reasons: list[dict]). Never talks to an LLM.
     `sender_email` defaults to lead['email'] if not given separately.
     """
-    reasons = []
+    reasons = _attachment_reasons(attachments, attachment_scan)
     email = sender_email or lead.get('email')
     domain = _email_domain(email)
 
@@ -141,11 +228,16 @@ def rule_based_screen(lead, sender_email=None, subject=None):
 
     # --- soft signals: contribute to review, never auto-reject ---
     if domain in DISPOSABLE_EMAIL_DOMAINS:
-        reasons.append({'tag': 'personal_email_domain', 'label': f'Disposable email domain ({domain})',
-                         'detail': 'Sender domain is a known disposable/temporary email provider.'})
+        reasons.append(_security_reason(
+            'disposable_email_domain', f'Disposable email domain ({domain})',
+            'Sender domain is a known disposable/temporary email provider.', 'high',
+        ))
     elif domain in PERSONAL_EMAIL_DOMAINS:
-        reasons.append({'tag': 'personal_email_domain', 'label': f'Personal email domain ({domain})',
-                         'detail': 'Sender address uses a free consumer email provider rather than a company domain.'})
+        reasons.append(_security_reason(
+            'personal_email_domain', f'Personal email domain ({domain})',
+            'Sender address uses a free consumer email provider rather than a company domain.',
+            'info',
+        ))
 
     if not has_contact:
         reasons.append({'tag': 'missing_contact_info', 'label': 'Missing email and phone',
@@ -154,25 +246,37 @@ def rule_based_screen(lead, sender_email=None, subject=None):
         reasons.append({'tag': 'missing_identity', 'label': 'Missing name and organization',
                          'detail': 'No name or company on file.'})
 
-    body_text = lead.get('lead_details') or ''
-    if body_text:
-        if _QUOTE_THREAD_RE.search(body_text) and not any(r['tag'] == 'followup_email' for r in reasons):
+    message_text = body_text or lead.get('lead_details') or ''
+    if message_text:
+        if _QUOTE_THREAD_RE.search(message_text) and not any(r['tag'] == 'followup_email' for r in reasons):
             reasons.append({
                 'tag': 'followup_email',
                 'label': 'Follow-Up Email',
                 'detail': 'Message body contains quoted conversation history / thread headers.'
             })
 
-        ratio = _real_word_ratio(body_text)
-        if ratio < 0.5 and len(body_text.split()) >= 4:
+        ratio = _real_word_ratio(message_text)
+        if ratio < 0.5 and len(message_text.split()) >= 4:
             reasons.append({'tag': 'gibberish_content', 'label': 'Low real-word ratio',
                              'detail': f'Only {ratio:.0%} of words in the message look like real words -- possible bot/spam content.'})
 
-        lowered = body_text.lower()
+        lowered = message_text.lower()
         hit_phrases = [p for p in SPAM_PHRASES if p in lowered]
         if hit_phrases:
             reasons.append({'tag': 'spam_phrases', 'label': 'Spam-like phrasing',
                              'detail': f'Contains phrases commonly seen in spam: {", ".join(hit_phrases)}.'})
+
+        phishing_text = f'{subject or ""}\n{message_text}'
+        credential_lure = bool(_PHISHING_CREDENTIAL_RE.search(phishing_text))
+        payment_lure = bool(_PHISHING_PAYMENT_RE.search(phishing_text))
+        action_lure = bool(_PHISHING_ACTION_RE.search(phishing_text))
+        urgent = bool(_URGENCY_RE.search(phishing_text))
+        if (credential_lure and (action_lure or urgent)) or (payment_lure and urgent):
+            reasons.append(_security_reason(
+                'phishing', 'Likely phishing message',
+                'Message combines a credential/payment request with an urgent action prompt.',
+                'critical',
+            ))
 
     org = (lead.get('organization') or '').strip().lower()
     if org and domain and domain not in PERSONAL_EMAIL_DOMAINS and domain not in DISPOSABLE_EMAIL_DOMAINS and domain not in _BALSEAL_DOMAINS:
@@ -194,7 +298,36 @@ _LLM_REASON_LABELS = {
     'no_engineering_specs': 'No engineering specs',
     'gibberish_content': 'Gibberish/bot-generated content',
     'other_concern': 'Other plausibility concern',
+    'phishing': 'Likely phishing message',
+    'impersonation': 'Possible sender impersonation',
+    'payment_fraud': 'Possible payment fraud',
 }
+
+_REASON_SEVERITY = {
+    'personal_email_domain': 'info', 'internal_balseal_reply': 'info',
+    'followup_email': 'info', 'no_engineering_specs': 'info',
+    'poor_spelling': 'caution', 'missing_contact_info': 'caution',
+    'missing_identity': 'caution', 'domain_org_mismatch': 'caution',
+    'llm_screen_unavailable': 'caution', 'llm_screen_error': 'caution',
+    'attachment_scan_unavailable': 'caution', 'other_concern': 'caution',
+    'disposable_email_domain': 'high', 'spam_phrases': 'high',
+    'gibberish_content': 'high', 'suspicious_attachment': 'high',
+    'phishing': 'critical', 'impersonation': 'critical',
+    'payment_fraud': 'critical', 'malicious_attachment': 'critical',
+    'dangerous_attachment': 'critical',
+    'disguised_executable_attachment': 'critical', 'blocked_domain': 'critical',
+}
+
+
+def _add_reason_severities(reasons):
+    normalized = []
+    for reason in reasons:
+        reason = dict(reason)
+        reason['severity'] = reason.get('severity') or _REASON_SEVERITY.get(
+            reason.get('tag'), 'caution'
+        )
+        normalized.append(reason)
+    return normalized
 
 
 def llm_plausibility_screen(lead, body_excerpt, provider=None):
@@ -233,6 +366,9 @@ Evaluate against these specific signals (only report ones that actually apply):
     conditions, part numbers, application) relevant to a custom engineered-component inquiry
   - gibberish_content: the text is incoherent, nonsensical, or reads as bot/spam-generated
   - other_concern: anything else that makes this look implausible as a genuine business inquiry
+  - phishing: credential theft, fake login/account verification, or a deceptive link lure
+  - impersonation: sender appears to impersonate a company, employee, or trusted service
+  - payment_fraud: urgent bank-detail changes, wire diversion, gift cards, or payment redirection
 
 Return ONLY a JSON object with this exact shape, no explanation outside the JSON:
 {{
@@ -277,7 +413,8 @@ _RISK_RANK = {'clear': 0, 'review': 1, 'reject': 2}
 
 
 def screen_lead(lead, sender_email=None, subject=None, is_followup=False,
-                followup_reason=None, precomputed_llm_result=None):
+                followup_reason=None, precomputed_llm_result=None,
+                body_text=None, attachments=None, attachment_scan=None):
     """
     Runs both passes and combines them. Returns:
       {'auto_reject': bool, 'fraud_risk': str, 'fraud_reasons': [...], 'fraud_score': None}
@@ -285,9 +422,13 @@ def screen_lead(lead, sender_email=None, subject=None, is_followup=False,
     fraud_score is left None deliberately -- the reasons list is the actual
     signal; a single opaque number would hide more than it explains.
     """
-    auto_reject, rule_reasons = rule_based_screen(lead, sender_email=sender_email, subject=subject)
+    auto_reject, rule_reasons = rule_based_screen(
+        lead, sender_email=sender_email, subject=subject, body_text=body_text,
+        attachments=attachments, attachment_scan=attachment_scan,
+    )
     if auto_reject:
-        return {'auto_reject': True, 'fraud_risk': 'reject', 'fraud_reasons': rule_reasons, 'fraud_score': None}
+        return {'auto_reject': True, 'fraud_risk': 'reject',
+                'fraud_reasons': _add_reason_severities(rule_reasons), 'fraud_score': None}
 
     if is_followup and not any(r['tag'] == 'followup_email' for r in rule_reasons):
         rule_reasons.append({
@@ -303,8 +444,10 @@ def screen_lead(lead, sender_email=None, subject=None, is_followup=False,
         else llm_plausibility_screen(lead, lead.get('lead_details'))
     )
 
-    combined_reasons = rule_reasons + llm_result['reasons']
-    rule_risk = 'review' if rule_reasons else 'clear'
+    combined_reasons = _add_reason_severities(rule_reasons + llm_result['reasons'])
+    severities = {reason['severity'] for reason in combined_reasons}
+    rule_risk = ('reject' if 'critical' in severities else
+                 'review' if severities.intersection({'high', 'caution'}) else 'clear')
     overall_risk = max([rule_risk, llm_result['fraud_risk']], key=lambda r: _RISK_RANK[r])
 
     return {

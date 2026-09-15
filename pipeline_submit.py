@@ -162,23 +162,28 @@ def _run_api_submit(client, leads):
             results['returned'] += 1
             continue
 
+        force_submit = bool(lead.get('force_submit'))
+
         # Local duplicate guard, checked before Oracle is touched at all.
         # Oracle's own dedup query cannot see leads it has not yet assigned an
         # owner to -- including ones this pipeline created minutes earlier --
         # so it silently misses the most likely duplicates. See
         # db.find_submitted_duplicate().
-        prior = db.find_submitted_duplicate(lead['id'])
-        if prior:
-            detail = (
-                f'Not sent to Oracle: lead {prior["id"]} '
-                f'({prior.get("oracle_project_name") or "no project name"}) was already '
-                f'submitted as Oracle record {prior["oracle_record_id"]} on '
-                f'{(prior.get("submitted_at") or "")[:10]}.'
-            )
-            db.mark_lead_duplicate_of_submitted(lead['id'], prior, detail)
-            logger.warning(f'  Skipped as duplicate: {label} -- {detail}')
-            results['ok'] += 1
-            continue
+        if not force_submit:
+            prior = db.find_submitted_duplicate(lead['id'])
+            if prior:
+                detail = (
+                    f'Not sent to Oracle: lead {prior["id"]} '
+                    f'({prior.get("oracle_project_name") or "no project name"}) was already '
+                    f'submitted as Oracle record {prior["oracle_record_id"]} on '
+                    f'{(prior.get("submitted_at") or "")[:10]}.'
+                )
+                db.mark_lead_duplicate_of_submitted(lead['id'], prior, detail)
+                logger.warning(f'  Skipped as duplicate: {label} -- {detail}')
+                results['ok'] += 1
+                continue
+        else:
+            logger.info(f'  Overriding duplicate check for lead {lead["id"]} (force_submit set)')
 
         # Backstop for leads staged before website derivation existed (and for
         # any source that bypasses pipeline_ingest): fill it in here so they
@@ -192,7 +197,8 @@ def _run_api_submit(client, leads):
 
         try:
             result = client.submit_lead(
-                lead, trade_show_name, source_label=source_label
+                lead, trade_show_name, source_label=source_label,
+                bypass_dedup=force_submit
             )
             all_warnings = list(result.get('field_warnings') or [])
 

@@ -33,6 +33,16 @@
     </div>
   </div>
 
+  <div id="ingest-loading-bar" class="ingest-loading-container{% if ingest_lease %} active{% endif %}" role="status" aria-live="polite">
+    <div class="ingest-loading-header">
+      <div class="ingest-spinner"></div>
+      <span id="ingest-loading-text">Ingesting leads from Sales inbox... New leads will appear automatically.</span>
+    </div>
+    <div class="ingest-progress-bar-bg">
+      <div class="ingest-progress-bar-fill"></div>
+    </div>
+  </div>
+
   {% for message in get_flashed_messages(category_filter=['ingest_success']) %}
     <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}); });</script>
   {% endfor %}
@@ -49,11 +59,70 @@
   <script>
     (function() {
       var form = document.getElementById('ingest-form');
+      var loadingContainer = document.getElementById('ingest-loading-bar');
+      var pollTimer = null;
+
+      function setIngestingState(isIngesting) {
+        if (loadingContainer) {
+          if (isIngesting) {
+            loadingContainer.classList.add('active');
+          } else {
+            loadingContainer.classList.remove('active');
+          }
+        }
+        if (form) {
+          var button = form.querySelector('button[type=submit]');
+          if (button) {
+            button.disabled = isIngesting;
+          }
+        }
+      }
+
+      function checkIngestStatus() {
+        fetch('/ingest/status', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+          .then(function(res) { return res.json(); })
+          .then(function(data) {
+            if (data.running) {
+              setIngestingState(true);
+            } else {
+              var wasActive = loadingContainer && loadingContainer.classList.contains('active');
+              setIngestingState(false);
+              if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+              }
+              if (wasActive) {
+                // Ingestion finished -- reload to fetch newly ingested leads!
+                window.location.reload();
+              }
+            }
+          })
+          .catch(function() {
+            if (pollTimer) {
+              clearInterval(pollTimer);
+              pollTimer = null;
+            }
+          });
+      }
+
+      function startStatusPolling() {
+        if (!pollTimer) {
+          pollTimer = setInterval(checkIngestStatus, 2000);
+        }
+      }
+
+      // If page loaded while lease is active, ensure loading state and start polling
+      if (loadingContainer && loadingContainer.classList.contains('active')) {
+        setIngestingState(true);
+        startStatusPolling();
+      }
+
       if (form) {
         form.addEventListener('submit', function(event) {
           event.preventDefault();
-          var button = form.querySelector('button[type=submit]');
-          if (button) button.disabled = true;
+          setIngestingState(true);
+          startStatusPolling();
+
           fetch(form.action, {
             method: 'POST',
             body: new FormData(form),
@@ -65,8 +134,14 @@
             if (!response.ok) throw new Error('ingest failed: ' + response.status);
             return response.json();
           }).then(function(data) {
-            if (button) button.disabled = false;
             showToast(data.ok ? data.message : data.error, data.ok ? null : 'error');
+            if (!data.ok) {
+              setIngestingState(false);
+              if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+              }
+            }
           }).catch(function() {
             // Keep the ordinary redirect/flash path as a reliable fallback.
             form.submit();

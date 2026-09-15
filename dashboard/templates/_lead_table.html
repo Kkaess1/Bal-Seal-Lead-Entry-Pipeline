@@ -65,7 +65,7 @@
     <td>Flags</td>
     <td>
       {% if lead.reasons %}
-        {% for reason in lead.reasons %}<span class="badge badge-reason" title="{{ reason.detail }}">{{ reason.label }}</span>{% endfor %}
+        {% for reason in lead.reasons %}<span class="badge badge-reason badge-flag-{{ reason.severity }}" title="{{ reason.detail }}">{{ reason.label }}</span>{% endfor %}
       {% else %}
         <span class="meta">None noted</span>
       {% endif %}

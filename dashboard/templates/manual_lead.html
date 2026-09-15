@@ -12,23 +12,6 @@
   {% endfor %}
 
   <div class="card">
-    {% if not ai_available %}
-      {# Said before the operator types a page of notes and finds out after. #}
-      <div class="submit-error-notice" role="alert">
-        <strong>No OpenAI key is configured.</strong>
-        The lead will still be created and whatever you paste is kept as its
-        details, but the fields will not be filled in for you — you will have
-        to enter them on the review form.
-      </div>
-    {% endif %}
-
-    <p class="meta" style="margin-top: 0;">
-      For a lead that did not arrive as an email — a phone call, a business
-      card, a form someone filled in while you watched. Paste whatever you
-      have and the fields are read out of it; you review and approve it on
-      Pending Review exactly like any other lead.
-    </p>
-
     <form method="post" action="{{ url_for('create_lead') }}"
           enctype="multipart/form-data" id="manual-lead-form">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
@@ -50,12 +33,6 @@
           <input type="file" name="screenshot" id="manual-screenshot"
                  accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" multiple>
         </label>
-        <p class="meta" style="margin: 0.35rem 0 0;">
-          You can also paste an image straight into the notes box above with
-          Ctrl+V — a clipboard that carries text pastes as text, so only a
-          picture on its own is attached. Screenshots are read once to fill in the fields and are not
-          stored — the text read out of them is kept on the lead.
-        </p>
         <p class="meta" id="manual-attached" style="margin: 0.35rem 0 0;" hidden></p>
       </fieldset>
 
@@ -63,9 +40,6 @@
         <button type="submit" class="btn-approve btn-lg" id="manual-submit">Read it and create the lead</button>
         <a class="btn btn-secondary" href="{{ url_for('index') }}">Cancel</a>
       </div>
-      <p class="meta" style="margin-top: 0.5rem;">
-        Takes a few seconds while the notes are read.
-      </p>
     </form>
   </div>
 

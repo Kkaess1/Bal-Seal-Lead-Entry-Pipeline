@@ -109,9 +109,26 @@ def _parse_reasons(lead):
     if not raw:
         return []
     try:
-        return json.loads(raw)
+        reasons = json.loads(raw)
     except (TypeError, ValueError):
         return []
+    if not isinstance(reasons, list):
+        return []
+    informational = {
+        'personal_email_domain', 'internal_balseal_reply', 'followup_email',
+        'no_engineering_specs',
+    }
+    normalized = []
+    for reason in reasons:
+        if not isinstance(reason, dict):
+            continue
+        reason = dict(reason)
+        severity = reason.get('severity')
+        if severity not in {'info', 'caution', 'high', 'critical'}:
+            severity = 'info' if reason.get('tag') in informational else 'caution'
+        reason['severity'] = severity
+        normalized.append(reason)
+    return normalized
 
 
 def _sales_address():
@@ -674,6 +691,7 @@ def _build_alert(lead):
             'headline': 'Not submitted — duplicate of an earlier lead',
             'detail': '; '.join(warnings) or 'An equivalent lead was already sent to Oracle.',
             'organization': lead.get('organization'),
+            'can_send_anyway': True,
         }
 
     # Oracle's pre-submission dedup matched an existing lead, so nothing new
@@ -685,6 +703,7 @@ def _build_alert(lead):
             'headline': 'Not submitted — already in Oracle',
             'detail': existing,
             'organization': lead.get('organization'),
+            'can_send_anyway': True,
         }
     # Sent back by return_lead_for_correction(): it is waiting in Pending
     # Review, editable, with the reason on its card. Headline says so, because
@@ -731,6 +750,7 @@ def _build_alert(lead):
             'headline': headline,
             'detail': '; '.join(warnings),
             'organization': lead.get('organization'),
+            'can_send_anyway': ambiguous,
         }
     return None
 
@@ -837,6 +857,20 @@ def dismiss_all_alerts():
     return redirect(request.referrer or url_for('index'))
 
 
+@app.route('/leads/<int:lead_id>/send-anyway', methods=['POST'])
+def send_anyway(lead_id):
+    lead = db.get_lead(lead_id)
+    if not lead:
+        abort(404)
+    db.mark_lead_for_force_submit(lead_id)
+    _start_submit_run()
+    flash(
+        f'{_lead_label(lead)} will be submitted to Oracle (bypassing duplicate checks).',
+        'submit_success',
+    )
+    return redirect(request.referrer or url_for('history'))
+
+
 @app.route('/')
 def index():
     """
@@ -854,7 +888,10 @@ def index():
     leads = db.list_leads(status=lead_stages.PENDING)
     leads = [_decorate(l) for l in leads]
     leads.sort(key=_newest_first, reverse=True)
-    return render_template('index.html', leads=leads)
+    ingest_lease = db.get_run_lease(_INGEST_JOB_KEY) or {}
+    if ingest_lease.get('status') not in ('starting', 'running'):
+        ingest_lease = None
+    return render_template('index.html', leads=leads, ingest_lease=ingest_lease)
 
 
 @app.route('/ingest', methods=['POST'])
@@ -879,10 +916,14 @@ def ingest_now():
     try:
         child_env = os.environ.copy()
         child_env['PIPELINE_INGEST_LEASE_TOKEN'] = lease_token
-        subprocess.Popen(
+        child = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve().parent.parent / 'pipeline_ingest.py')],
             cwd=str(Path(__file__).resolve().parent.parent), env=child_env,
         )
+        if isinstance(child.pid, int):
+            db.update_run_lease(
+                _INGEST_JOB_KEY, lease_token, 'starting', pid=child.pid,
+            )
     except OSError:
         db.update_run_lease(_INGEST_JOB_KEY, lease_token, 'failed', 'Process could not start')
         app.logger.exception('Could not start a manual ingest run')
@@ -899,13 +940,44 @@ def ingest_now():
     return redirect(url_for('index'))
 
 
+@app.route('/ingest/reset', methods=['POST'])
+def reset_ingest():
+    """Recover an ingest claim whose worker was forcibly terminated."""
+    if db.reset_orphaned_run_lease(_INGEST_JOB_KEY):
+        message = 'Cleared the orphaned ingest run. You can start ingestion again.'
+        category = 'ingest_success'
+    elif db.run_lease_process_is_running(_INGEST_JOB_KEY):
+        message = 'The ingestion worker is still running, so its lock was not reset.'
+        category = 'ingest_error'
+    else:
+        message = 'There is no active ingest run to reset.'
+        category = 'ingest_error'
+    if _wants_json():
+        return {'ok': category == 'ingest_success',
+                'message' if category == 'ingest_success' else 'error': message}
+    flash(message, category)
+    return redirect(url_for('index'))
+
+
+@app.route('/ingest/status')
+def ingest_status():
+    """Return JSON status indicating whether lead ingestion is actively running."""
+    lease = db.get_run_lease(_INGEST_JOB_KEY) or {}
+    running = lease.get('status') in ('starting', 'running')
+    return {
+        'running': running,
+        'status': lease.get('status') if running else None,
+        'pid': lease.get('pid') if running else None,
+    }
+
+
 @app.route('/leads/new')
 def new_lead():
     """The form for entering a lead that never arrived as an email."""
+    if not (secrets_store.get_secret('OPENAI_API_KEY') or secrets_store.get_secret('CHATGPT_API')):
+        flash('No OpenAI key is configured. Extraction will use basic pattern matching.', 'manual_error')
     return render_template('manual_lead.html',
-                           max_images=manual_lead_module.MAX_IMAGES,
-                           ai_available=bool(secrets_store.get_secret('OPENAI_API_KEY')
-                                             or secrets_store.get_secret('CHATGPT_API')))
+                           max_images=manual_lead_module.MAX_IMAGES)
 
 
 @app.route('/leads/new', methods=['POST'])
@@ -1751,9 +1823,10 @@ def history():
     # twice and "where is it?" had two answers. They now belong to the queue
     # until Oracle has actually taken them -- see lead_stages.py.
     statuses = list(lead_stages.HISTORY)
+    query = request.args.get('q', '').strip()
     per_page = 25
     page = max(1, request.args.get('page', 1, type=int))
-    total = db.count_leads(status=statuses)
+    total = db.count_leads(status=statuses, query=query if query else None)
     pages = max(1, (total + per_page - 1) // per_page)
     page = min(page, pages)
     # order='finished', not the inbox order the other two pages use: these
@@ -1763,7 +1836,7 @@ def history():
     # as unordered. See db.LEAD_ORDERS.
     leads = db.list_leads(
         status=statuses, limit=per_page, offset=(page - 1) * per_page,
-        order='finished',
+        order='finished', query=query if query else None,
     )
     leads = [_decorate(l) for l in leads]
     for lead in leads:
@@ -1771,7 +1844,7 @@ def history():
         # ISO stamp -- so the fixed-width column still fits it.
         lead['finished_at'] = (_finished_at(lead) or '')[:16].replace('T', ' ')
     return render_template(
-        'history.html', leads=leads, total=total, page=page, pages=pages,
+        'history.html', leads=leads, total=total, page=page, pages=pages, query=query,
     )
 
 

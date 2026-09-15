@@ -136,7 +136,8 @@ class ManualLeadRouteTests(unittest.TestCase):
 
     def test_the_form_warns_when_there_is_no_ai_key(self):
         """Said before a page of notes gets typed, not after."""
-        with patch('dashboard.app.secrets_store.get_secret', return_value=''):
+        with patch('ai_provider.get_openai_key', return_value=''), \
+             patch('secrets_store.get_secret', return_value=''):
             page = self.client.get('/leads/new').get_data(as_text=True)
         self.assertIn('No OpenAI key is configured', page)
 
