@@ -354,22 +354,62 @@ in the repo (see `reference/README.md`).
 
 ## Setup
 
+On a fresh clone (Windows, classic Outlook with the Sales mailbox added, and
+Send As / Send on Behalf for `sales@balseal.com`):
+
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
-Copy-Item .env.example .env
-py db.py
+.\.venv\Scripts\python db.py
 ```
 
-Store production credentials in Windows Credential Manager:
+Store credentials in Windows Credential Manager. It is per Windows user, so
+each person enters their own; no `.env` is needed when every secret is here:
 
 ```powershell
-py secrets_store.py OPENAI_API_KEY <key>
-py secrets_store.py ORACLE_USERNAME <username>
-py secrets_store.py ORACLE_PASSWORD <password>
+.\.venv\Scripts\python secrets_store.py OPENAI_API_KEY <key>
+.\.venv\Scripts\python secrets_store.py ORACLE_USERNAME <username>
+.\.venv\Scripts\python secrets_store.py ORACLE_PASSWORD <password>
+.\.venv\Scripts\python -c "import secrets; print(secrets.token_hex(32))"
+.\.venv\Scripts\python secrets_store.py DASHBOARD_SECRET_KEY <that value>
 ```
 
-Set a persistent random `DASHBOARD_SECRET_KEY` in `.env`.
+Then `.\setup_scheduler.bat`, `.\setup_oracle_sync_task.ps1` and
+`.\setup_retention_task.ps1` from that user's own account (DEPLOYMENT.md).
+
+### Moving to another computer
+
+A clone carries the code and none of the data: `pipeline.db` and the email
+folders hold customers' details and are kept out of git on purpose.
+`transfer_data.py` moves them:
+
+```powershell
+# old computer (the dashboard may keep running)
+py transfer_data.py export                  # writes a zip to your Desktop
+
+# new computer, after Setup, before starting the dashboard
+.\.venv\Scripts\python transfer_data.py import "<path to the zip>"
+```
+
+Why not copy the folder: the database records every cached email by its full
+path under the old user's folder, so on another computer every email body,
+thread and Oracle attachment would point nowhere. Import rewrites those paths,
+gives the long entry-ID filenames of pre-August caches short hashed names (a
+deeper folder pushed them past Windows' 260-character limit), and clears any
+"job running" record from the old computer. Export snapshots the database with
+SQLite's backup API, which is consistent even while the dashboard writes.
+
+The zip is every customer record in one file. Move it by company OneDrive or a
+USB drive, never email or GitHub; export refuses to write it inside the repo
+and `*.zip` is gitignored. Import refuses to replace a database that already
+has leads unless given `--replace`, and even then keeps the old one as
+`pipeline.before-import-<time>.db`.
+
+**Run the pipeline on one computer at a time.** Each has its own database, and
+an email one ingests is tagged green so the other skips it: leads would split
+between two dashboards, and neither would see the other's history, which
+submission's duplicate check relies on. Export, import, and stop using the
+old one.
 
 ## Commands
 

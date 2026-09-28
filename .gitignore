@@ -59,3 +59,9 @@ Thumbs.db
 # these need naming explicitly or a `git add -A` publishes them.
 scratch_*.json
 scratch_*.xlsx
+
+# Data exports from transfer_data.py: the whole customer dataset in one file.
+# export refuses to write inside the repo, but the zip is often copied here to
+# be imported.
+*.zip
+*.zip.part

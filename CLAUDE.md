@@ -25,6 +25,8 @@ py pipeline_submit.py                        # send approved leads to Oracle
 py oracle_sync.py                            # refresh Oracle outcomes (read-only)
 py purge_old_leads.py                        # dry run: what retention would delete
 py purge_old_leads.py --apply                # actually delete it
+py transfer_data.py export                   # data to a zip, for another computer
+py transfer_data.py import <zip>             # on that computer (rewrites stored paths)
 py -m dashboard.serve                        # dashboard under Waitress (normal operation)
 ```
 

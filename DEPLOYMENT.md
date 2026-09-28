@@ -6,12 +6,16 @@ This document contains step-by-step instructions for IT and system administrator
 
 ## 1. System Requirements
 
-- **Operating System:** Windows Server / Windows 10/11 or Linux VM.
+- **Operating System:** Windows 10/11, signed in as the operator, with classic Outlook
+  (not "new Outlook") and the Sales shared mailbox open. Ingestion drives Outlook
+  through COM.
 - **Python:** 3.10 – 3.14
 - **Database:** SQLite (built-in file database `pipeline.db`, zero setup required).
 - **Network Access:**
-  - Inbound: Port `5151` for internal team dashboard access.
-  - Outbound: HTTPS (`https://cagc.fa.us1.oraclecloud.com`) to Oracle Sales Cloud REST API & Microsoft Graph API (if using Graph for mail ingestion).
+  - Inbound: none. The dashboard listens on `127.0.0.1:5151` only, and
+    `dashboard/serve.py` refuses anything else (see HOSTING_SECURITY.md).
+  - Outbound: HTTPS to Oracle Sales Cloud (`https://cagc.fa.us1.oraclecloud.com`)
+    and the OpenAI API.
 
 ---
 
@@ -110,7 +114,10 @@ To run the web dashboard for internal team access:
 ```powershell
 .venv\Scripts\python.exe -m dashboard.serve
 ```
-The dashboard binds to `http://0.0.0.0:5151` (or your server's IP / internal DNS host).
+The dashboard binds to `http://127.0.0.1:5151`, on the same computer only.
+
+To move an existing installation's data to this computer, see README
+"Moving to another computer" (`transfer_data.py`).
 
 ---
 
