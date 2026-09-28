@@ -17,6 +17,19 @@
       </svg>
       Create lead
     </a>
+    {# The batch version of Create lead: a trade-show export or a list
+       someone kept, turned into one card per row. #}
+    <a class="btn btn-secondary" href="{{ url_for('import_form') }}"
+       title="Import a spreadsheet of leads, one per row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+           style="width:16px;height:16px;">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <path d="M17 8l-5-5-5 5"></path>
+        <path d="M12 3v12"></path>
+      </svg>
+      Import spreadsheet
+    </a>
     <form method="post" action="{{ url_for('ingest_now') }}" id="ingest-form">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn-approve"
@@ -54,6 +67,9 @@
   {% endfor %}
   {% for message in get_flashed_messages(category_filter=['manual_error']) %}
     <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}, 'error'); });</script>
+  {% endfor %}
+  {% for message in get_flashed_messages(category_filter=['import_success']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}); });</script>
   {% endfor %}
 
   <script>
@@ -187,6 +203,22 @@
       {% if lead.submit_error %}
         <div class="submit-error-notice" role="alert">
           <strong>Not sent to Oracle.</strong> {{ lead.submit_error|replace('Submission blocked: ', '') }}
+          {% set candidates = lead.submit_error|extract_company_candidates %}
+          {% if candidates %}
+            <div style="margin-top: 0.5rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center;">
+              {% for cand in candidates %}
+                <form method="post" action="{{ url_for('assign_company', lead_id=lead.id) }}" style="margin:0; display:inline;">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="company_name" value="{{ cand }}">
+                  <button type="submit" class="btn btn-secondary btn-inline" style="padding: 0.25rem 0.6rem; font-size: 0.78rem; font-weight: 600; color: #1a6f3b; border-color: #1a6f3b;" title="Assign to existing company {{ cand }}">Assign to "{{ cand }}"</button>
+                </form>
+              {% endfor %}
+              <form method="post" action="{{ url_for('send_anyway', lead_id=lead.id) }}" style="margin:0; display:inline;">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-secondary btn-inline" style="padding: 0.25rem 0.6rem; font-size: 0.78rem; font-weight: 600; color: var(--accent);">Create as New Company</button>
+              </form>
+            </div>
+          {% endif %}
         </div>
       {% endif %}
       {% include '_lead_table.html' %}

@@ -21,7 +21,7 @@ import territory_map
 # 2026-08-18: John Pan's NORTHEAST territories were transferred to Bill Rost.
 NORTHEAST = 'Bill Rost'
 WEST = 'Keaton Kaess'
-SOCAL = 'Jeff Frederick'
+SOCAL = 'John Pan'
 SOUTH = 'Mark Copeland'
 MIDWEST = 'Wade Kahout'
 MIDEAST = 'Bill Rost'
@@ -97,7 +97,7 @@ class UsTerritoryTests(unittest.TestCase):
         self.assertEqual(tm, MIDEAST)
 
     def test_california_splits_on_zip(self):
-        # "CA Zip 93599 & Below" -> Jeff Frederick, "93600 & Above" -> Keaton Kaess.
+        # "CA Zip 93599 & Below" -> John Pan, "93600 & Above" -> Keaton Kaess.
         self.assertEqual(
             territory_map.assign_tm({'state': 'CA', 'zip': '92610'})[0], SOCAL)
         self.assertEqual(
@@ -130,7 +130,7 @@ class UsTerritoryTests(unittest.TestCase):
         self.assertEqual(tm, MIDEAST, basis)
 
     def test_nevada_splits_on_clark_county(self):
-        # Clark County -> Jeff Frederick; the rest of Nevada -> Keaton Kaess.
+        # Clark County -> John Pan; the rest of Nevada -> Keaton Kaess.
         vegas, basis = territory_map.assign_tm({'state': 'NV', 'zip': '89101'})
         self.assertEqual(vegas, SOCAL, basis)
         reno, basis = territory_map.assign_tm({'state': 'NV', 'zip': '89501'})

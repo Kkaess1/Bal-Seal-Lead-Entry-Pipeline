@@ -37,6 +37,22 @@
       {% if lead.submit_error %}
         <div class="submit-error-notice" role="alert">
           <strong>Not sent to Oracle.</strong> {{ lead.submit_error|replace('Submission blocked: ', '') }}
+          {% set candidates = lead.submit_error|extract_company_candidates %}
+          {% if candidates %}
+            <div style="margin-top: 0.5rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center;">
+              {% for cand in candidates %}
+                <form method="post" action="{{ url_for('assign_company', lead_id=lead.id) }}" style="margin:0; display:inline;">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="company_name" value="{{ cand }}">
+                  <button type="submit" class="btn btn-secondary btn-inline" style="padding: 0.25rem 0.6rem; font-size: 0.78rem; font-weight: 600; color: #1a6f3b; border-color: #1a6f3b;" title="Assign to existing company {{ cand }}">Assign to "{{ cand }}"</button>
+                </form>
+              {% endfor %}
+              <form method="post" action="{{ url_for('send_anyway', lead_id=lead.id) }}" style="margin:0; display:inline;">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-secondary btn-inline" style="padding: 0.25rem 0.6rem; font-size: 0.78rem; font-weight: 600; color: var(--accent);">Create as New Company</button>
+              </form>
+            </div>
+          {% endif %}
         </div>
       {% endif %}
 
@@ -111,6 +127,22 @@
               {% if lead.submit_error %}
                 <div class="submit-error-notice" role="alert" style="margin: var(--s-3) 0 0;">
                   <strong>Not sent to Oracle.</strong> {{ lead.submit_error|replace('Submission blocked: ', '') }}
+                  {% set candidates = lead.submit_error|extract_company_candidates %}
+                  {% if candidates %}
+                    <div style="margin-top: 0.5rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center;">
+                      {% for cand in candidates %}
+                        <form method="post" action="{{ url_for('assign_company', lead_id=lead.id) }}" style="margin:0; display:inline;">
+                          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                          <input type="hidden" name="company_name" value="{{ cand }}">
+                          <button type="submit" class="btn btn-secondary btn-inline" style="padding: 0.25rem 0.6rem; font-size: 0.78rem; font-weight: 600; color: #1a6f3b; border-color: #1a6f3b;" title="Assign to existing company {{ cand }}">Assign to "{{ cand }}"</button>
+                        </form>
+                      {% endfor %}
+                      <form method="post" action="{{ url_for('send_anyway', lead_id=lead.id) }}" style="margin:0; display:inline;">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="btn btn-secondary btn-inline" style="padding: 0.25rem 0.6rem; font-size: 0.78rem; font-weight: 600; color: var(--accent);">Create as New Company</button>
+                      </form>
+                    </div>
+                  {% endif %}
                 </div>
               {% elif lead.blockers and lead.can_recall %}
                 <div class="submit-error-notice" role="alert" style="margin: var(--s-3) 0 0;">

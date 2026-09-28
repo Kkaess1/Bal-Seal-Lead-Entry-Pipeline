@@ -32,7 +32,10 @@ from dotenv import load_dotenv
 import company_website
 import db
 import secrets_store
-from oracle_api import OracleApiError, OracleLeadApiClient, submission_blockers
+from oracle_api import (
+    TRADE_SHOW_LEAD_SOURCE, OracleApiError, OracleLeadApiClient, lead_source_for,
+    submission_blockers,
+)
 
 logger = logging.getLogger(__name__)
 LOG_DIR = Path(__file__).parent / 'logs'
@@ -65,11 +68,28 @@ _SOURCE_LABELS = {
     'email_excel_attachment': ('Tradeshow', 'Email Import'),
     'email_ai_extract': ('Inquiry', 'Website/Email'),
     'manual_entry': ('Inquiry', 'Manual Entry'),
+    # A lead list uploaded on the dashboard (spreadsheet_import.py). Only
+    # reached by an upload given the Website source: a trade-show list is
+    # titled after its show, one from anywhere else after its Lead Source
+    # (see _project_label), and a trade-show lead with no show cannot be
+    # approved at all (oracle_api.submission_blockers()).
+    'spreadsheet_upload': ('Import', 'Spreadsheet Upload'),
 }
 _DEFAULT_SOURCE_LABEL = ('Inquiry', 'Website/Email')
 
 
 def _project_label(lead):
+    # The project name says where the lead came from, the same answer as its
+    # Lead Source (oracle_api.lead_source_for). A show lead names the show:
+    # "NORTHWIND CONNECTORS - Sam Ortiz - Tradeshow - Space Tech Expo". A
+    # lead given another source by hand -- a referral list, a webinar's
+    # sign-ups -- is titled with that source rather than as a web inquiry.
+    source = lead_source_for(lead)
+    trade_show = (lead.get('trade_show') or '').strip()
+    if source == TRADE_SHOW_LEAD_SOURCE and trade_show:
+        return 'Tradeshow', trade_show
+    if (lead.get('lead_source') or '').strip() == source             and source not in (TRADE_SHOW_LEAD_SOURCE, 'Website'):
+        return source, None
     return _SOURCE_LABELS.get(lead.get('source'), _DEFAULT_SOURCE_LABEL)
 
 
@@ -77,9 +97,10 @@ def _load_oracle_config():
     with open(Path(__file__).parent / 'config.json') as f:
         config = json.load(f)
     oracle_config = dict(config['oracle'])
-    # Every lead this pipeline submits comes from the Sales inbox (website
-    # inquiries/form submissions), never a physical trade show. Forced here so
-    # it holds regardless of what config.json carries.
+    # The default Lead Source, for a lead with nothing saying otherwise: a
+    # Sales inbox inquiry. Forced here so it holds regardless of what
+    # config.json carries. Trade-show leads and leads given a source by hand
+    # override it per lead -- see oracle_api.lead_source_for().
     oracle_config['lead_source'] = 'Website'
     return oracle_config
 
@@ -226,6 +247,11 @@ def _run_api_submit(client, leads):
             results['ok'] += 1
         except OracleApiError as e:
             detail = str(e)
+            if 'resembles' in detail or 'Submission blocked: Company' in detail:
+                db.return_lead_for_correction(lead['id'], detail)
+                logger.warning(f'  Returned for correction (ambiguous company match): {label} -- {detail}')
+                results['returned'] += 1
+                continue
             # A transport failure after POST may mean Oracle created the lead
             # but the response never reached us. Never retry that blindly.
             if e.outcome_unknown:

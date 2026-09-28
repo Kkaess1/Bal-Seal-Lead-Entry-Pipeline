@@ -83,6 +83,16 @@
                     <select name="rank">
                       {% for value in ('', 'HOT', 'WARM') %}<option value="{{ value }}"{% if (lead.rank or '')|upper == value %} selected{% endif %}>{{ value or 'Not set' }}</option>{% endfor %}
                     </select>
+                  {% elif field == 'lead_source' %}
+                    {# Empty is "decide at submission": Trade Shows when a
+                       show is set, Website otherwise. See
+                       oracle_api.lead_source_for(). #}
+                    <select name="lead_source">
+                      <option value=""{% if not lead.lead_source %} selected{% endif %}>Automatic ({{ 'Trade Shows' if lead.trade_show or lead.source == 'email_excel_attachment' else 'Website' }})</option>
+                      {% for value in lead_source_options %}
+                        <option value="{{ value }}"{% if lead.lead_source == value %} selected{% endif %}>{{ value }}</option>
+                      {% endfor %}
+                    </select>
                   {% elif field == 'assigned_tm' %}
                     <select name="assigned_tm">
                       <option value=""{% if not lead.assigned_tm %} selected{% endif %}>Unassigned</option>

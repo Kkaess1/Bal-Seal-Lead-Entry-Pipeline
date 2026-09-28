@@ -28,6 +28,9 @@ KNOWN DIVERGENCE FROM THAT PDF -- deliberate, do not "correct" it back:
   * 2026-08-18: John Pan's NORTHEAST territories (US states CT, DE, MA, ME, NH,
     NJ, NY, RI, VT, PA Zip 17000 & above, and Canadian provinces NL, NS, QC)
     were transferred to Bill Rost. John Pan continues to hold the Americas list.
+  * 2026-09-28: Jeff Frederick left the company. His SOUTHERN CALIFORNIA
+    territory (CA Zip 93599 & below, Arizona, New Mexico, Nevada Clark County)
+    passed to John Pan, who also keeps the Americas list.
 """
 
 # --- International: country name (lowercased) -> TM ---
@@ -118,8 +121,8 @@ US_STATE_TO_TM = {
     'idaho': 'Keaton Kaess', 'montana': 'Keaton Kaess', 'oregon': 'Keaton Kaess',
     'utah': 'Keaton Kaess', 'washington': 'Keaton Kaess', 'wyoming': 'Keaton Kaess',
 
-    # Jeff Frederick (SOUTHERN CALIFORNIA)
-    'arizona': 'Jeff Frederick', 'new mexico': 'Jeff Frederick',
+    # John Pan (SOUTHERN CALIFORNIA)
+    'arizona': 'John Pan', 'new mexico': 'John Pan',
 
     # Mark Copeland (SOUTH)
     'alabama': 'Mark Copeland', 'arkansas': 'Mark Copeland', 'florida': 'Mark Copeland',
@@ -187,7 +190,7 @@ US_STATE_ABBR = {
 }
 
 # ZIP-code / county splits called out explicitly in the source table.
-_CA_SOUTHERN_MAX_ZIP = 93599   # <= this -> Jeff Frederick (Southern CA), else -> Keaton Kaess (West)
+_CA_SOUTHERN_MAX_ZIP = 93599   # <= this -> John Pan (Southern CA), else -> Keaton Kaess (West)
 
 
 # The ZIP ranges those two states actually occupy. Only these two states are
@@ -297,8 +300,8 @@ _CRR_ASIA = 'Alan Lam'
 _ASIA_TMS = {'Alan Lam', 'Nozomi Kato', 'Sam Tam'}
 
 # Derived from COUNTRY_TO_TM only, never from the US/Canada tables: John Pan
-# holds the Northeast as well as the Americas, and a New York lead is not a
-# Latin America lead.
+# holds Southern California as well as the Americas, and a San Diego lead is
+# not a Latin America lead.
 _LATIN_AMERICA_COUNTRIES = {
     country for country, tm in COUNTRY_TO_TM.items() if tm == 'John Pan'
 } | {'puerto rico'}
@@ -419,7 +422,7 @@ def assign_tm(lead):
             if not zip5:
                 return None, 'California -- need a ZIP code to determine North/South split'
             if int(zip5) <= _CA_SOUTHERN_MAX_ZIP:
-                return 'Jeff Frederick', f'California, ZIP {zip5} (<= {_CA_SOUTHERN_MAX_ZIP})'
+                return 'John Pan', f'California, ZIP {zip5} (<= {_CA_SOUTHERN_MAX_ZIP})'
             return 'Keaton Kaess', f'California, ZIP {zip5} (> {_CA_SOUTHERN_MAX_ZIP})'
 
 
@@ -427,7 +430,7 @@ def assign_tm(lead):
             if not zip5:
                 return None, 'Nevada -- need a ZIP code to determine the Clark County split'
             if zip5[:3] in _CLARK_COUNTY_NV_ZIP3:
-                return 'Jeff Frederick', f'Nevada, ZIP {zip5} -- inferred Clark County (ZIP-prefix heuristic, verify)'
+                return 'John Pan', f'Nevada, ZIP {zip5} -- inferred Clark County (ZIP-prefix heuristic, verify)'
             return 'Keaton Kaess', f'Nevada, ZIP {zip5} -- inferred not Clark County (ZIP-prefix heuristic, verify)'
 
         if state in US_STATE_TO_TM:

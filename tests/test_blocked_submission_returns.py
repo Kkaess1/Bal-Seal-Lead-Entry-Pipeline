@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import db
 import pipeline_submit
-from dashboard.app import _build_alert, app
+from dashboard.app import _build_alert, _extract_company_candidates, app
 import territory_map
 
 
@@ -446,6 +446,134 @@ class ReturnedLeadAlertTests(_Base):
         self._lead(status='pending_review')
 
         self.assertEqual(db.list_submission_alerts(), [])
+
+
+class AmbiguousCompanyAssignmentTests(_Base):
+    """"Assign to <account>" has to end the ambiguous-match block, not restage it.
+
+    An Oracle account blocked a lead as ambiguous, the operator picked it, and
+    the lead came straight back with the same block -- round and round. Two
+    reasons: the account name was read out of the warning text with a regex
+    that stopped at the first bracket, so 'LOCKHEED MARTIN (1389119)' was
+    written onto the lead as 'LOCKHEED MARTIN (1389119', which matches no
+    account and resembles exactly the one it was cut from; and the lead was
+    left staged in the Input Queue while a submit run that only looks at
+    'approved' was started for it.
+    """
+
+    BLOCK = (
+        "Submission blocked: Company 'LOCKHEED MARTIN' resembles 1 existing Oracle "
+        "account(s) ('LOCKHEED MARTIN (1389119)'). Choose whether to assign to an "
+        "existing company or create as a new company."
+    )
+
+    def _blocked_lead(self, **overrides):
+        lead_id = self._lead(status='approved', organization='LOCKHEED MARTIN', **overrides)
+        db.return_lead_for_correction(lead_id, self.BLOCK)
+        return lead_id
+
+    def test_a_bracketed_account_name_survives_being_read_off_the_warning(self):
+        self.assertEqual(
+            _extract_company_candidates(self.BLOCK), ['LOCKHEED MARTIN (1389119)'],
+        )
+
+    def test_an_account_name_holding_a_comma_is_one_candidate_not_two(self):
+        text = ("Company 'Acme' resembles 1 existing Oracle account(s) "
+                "('ACME, INC (77)'). Choose whether to assign")
+
+        self.assertEqual(_extract_company_candidates(text), ['ACME, INC (77)'])
+
+    def test_an_apostrophe_in_a_name_is_read_from_its_double_quotes(self):
+        # repr() quotes "O'BRIEN MEDICAL" with double quotes, and O'Brien is a
+        # realistic customer.
+        text = ("""Company 'OBrien' resembles 1 existing Oracle """
+                """account(s) ("O'BRIEN MEDICAL"). Choose whether to assign""")
+
+        self.assertEqual(_extract_company_candidates(text), ["O'BRIEN MEDICAL"])
+
+    def test_the_name_written_onto_the_lead_is_the_one_oracle_holds(self):
+        lead_id = self._blocked_lead()
+
+        with patch('dashboard.app._start_submit_run', return_value=True):
+            self._post(f'/leads/{lead_id}/assign_company',
+                       company_name='LOCKHEED MARTIN (1389119)')
+
+        self.assertEqual(db.get_lead(lead_id)['organization'], 'LOCKHEED MARTIN (1389119)')
+
+    def test_the_lead_is_approved_not_left_staged(self):
+        # 'review_approved' sits in the Input Queue and pipeline_submit only
+        # ever claims 'approved', so the run started for it did nothing.
+        lead_id = self._blocked_lead()
+
+        with patch('dashboard.app._start_submit_run', return_value=True):
+            self._post(f'/leads/{lead_id}/assign_company',
+                       company_name='LOCKHEED MARTIN (1389119)')
+
+        self.assertEqual(db.get_lead(lead_id)['status'], 'approved')
+
+    def test_a_submit_run_is_started_for_it(self):
+        lead_id = self._blocked_lead()
+
+        with patch('dashboard.app._start_submit_run', return_value=True) as run:
+            self._post(f'/leads/{lead_id}/assign_company',
+                       company_name='LOCKHEED MARTIN (1389119)')
+
+        self.assertTrue(run.called)
+
+    def test_the_old_block_does_not_follow_it_forward(self):
+        lead_id = self._blocked_lead()
+
+        with patch('dashboard.app._start_submit_run', return_value=True):
+            self._post(f'/leads/{lead_id}/assign_company',
+                       company_name='LOCKHEED MARTIN (1389119)')
+
+        lead = db.get_lead(lead_id)
+        self.assertIsNone(lead['submit_error'])
+        self.assertEqual(lead['force_submit'], 0)
+        self.assertIsNone(_build_alert(lead))
+
+    def test_a_lead_already_in_the_queue_is_reassigned_in_place(self):
+        # The button is on the Input Queue too, where a failed lead keeps its
+        # error; approve_lead() refuses that status, which left the rename
+        # applied and the lead parked.
+        lead_id = self._lead(status='failed', organization='LOCKHEED MARTIN')
+        db.mark_lead_failed(lead_id, self.BLOCK)
+
+        with patch('dashboard.app._start_submit_run', return_value=True):
+            self._post(f'/leads/{lead_id}/assign_company',
+                       company_name='LOCKHEED MARTIN (1389119)')
+
+        lead = db.get_lead(lead_id)
+        self.assertEqual(lead['status'], 'approved')
+        self.assertEqual(lead['organization'], 'LOCKHEED MARTIN (1389119)')
+
+    def test_a_lead_a_run_is_sending_is_not_renamed_underneath_it(self):
+        # It may be mid-POST; changing the company now is the one edit that
+        # cannot be taken back.
+        lead_id = self._lead(status='submitting', organization='LOCKHEED MARTIN')
+
+        with patch('dashboard.app._start_submit_run', return_value=True) as run:
+            self._post(f'/leads/{lead_id}/assign_company',
+                       company_name='LOCKHEED MARTIN (1389119)')
+
+        lead = db.get_lead(lead_id)
+        self.assertEqual(lead['status'], 'submitting')
+        self.assertEqual(lead['organization'], 'LOCKHEED MARTIN')
+        run.assert_not_called()
+
+    def test_an_assignment_onto_an_unsendable_lead_goes_back_for_correction(self):
+        # Same gate as every other route to Oracle: the rename does not make a
+        # lead with no territory sendable.
+        lead_id = self._blocked_lead(assigned_tm=None)
+
+        with patch('dashboard.app._start_submit_run', return_value=True) as run:
+            self._post(f'/leads/{lead_id}/assign_company',
+                       company_name='LOCKHEED MARTIN (1389119)')
+
+        lead = db.get_lead(lead_id)
+        self.assertEqual(lead['status'], 'pending_review')
+        self.assertIn('Territory Manager is unassigned', lead['submit_error'])
+        run.assert_not_called()
 
 
 if __name__ == '__main__':

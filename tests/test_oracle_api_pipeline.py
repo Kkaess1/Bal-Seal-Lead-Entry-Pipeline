@@ -343,6 +343,83 @@ class OracleLeadApiClientTests(unittest.TestCase):
         )
         self.assertTrue(any('website field' in w for w in result['field_warnings']))
 
+    def _linking_client(self, first_status, first_text):
+        """Client whose POST fails once then succeeds, for the link retry.
+
+        Its GETs answer the contact lookup with a match, so submit_lead builds
+        a payload that links by identifier.
+        """
+        contact = MagicMock(status_code=200, text='')
+        contact.json.return_value = {'items': [{
+            'PartyId': 1, 'PartyNumber': '15001', 'ContactName': 'ADA LOVELACE',
+            'EmailAddress': 'ada@example.com', 'AccountName': 'ANALYTICAL ENGINES',
+            'AccountPartyId': 100000055846517, 'AccountPartyNumber': '11620',
+        }]}
+        empty = MagicMock(status_code=200, text='')
+        empty.json.return_value = {'items': []}
+        rejected = MagicMock(status_code=first_status, text=first_text)
+        accepted = MagicMock(status_code=201)
+        accepted.json.return_value = {'LeadId': 99, 'LeadNumber': 'LN-0042'}
+        session = MagicMock()
+        session.get.side_effect = [contact, empty]
+        session.post.side_effect = [rejected, accepted]
+        return oracle_api.OracleLeadApiClient(
+            {'base_url': 'https://fake.oracle.example', 'lead_source': 'Website',
+             'api_timeout_seconds': 10},
+            username='u', password='p', session=session,
+        ), session
+
+    def test_a_matched_lead_is_sent_linked_by_identifier(self):
+        client, session = self._linking_client(201, '')
+        session.post.side_effect = None
+        accepted = MagicMock(status_code=201)
+        accepted.json.return_value = {'LeadId': 99, 'LeadNumber': 'LN-0042'}
+        session.post.return_value = accepted
+
+        client.submit_lead(self._lead(), 'Website/Email', source_label='Inquiry')
+
+        posted = json.loads(session.post.call_args.kwargs['data'])
+        self.assertEqual(posted['CustomerId'], 100000055846517)
+        self.assertEqual(posted['ContactPartyNumber'], '15001')
+
+    def test_a_rejected_link_retries_by_name_and_still_lands_the_lead(self):
+        # If a tenant will not take the identifier, the lead must still reach
+        # Oracle -- losing the link is bad, losing the lead is worse.
+        client, session = self._linking_client(
+            400, 'CustomerId is not a valid field for this operation.'
+        )
+
+        result = client.submit_lead(self._lead(), 'Website/Email', source_label='Inquiry')
+
+        self.assertTrue(result['success'])
+        self.assertEqual(session.post.call_count, 2)
+        second = json.loads(session.post.call_args_list[1].kwargs['data'])
+        self.assertNotIn('CustomerId', second)
+        self.assertNotIn('ContactPartyNumber', second)
+        self.assertEqual(second['CustomerPartyName'], 'ANALYTICAL ENGINES')
+        self.assertEqual(second['PrimaryContactPartyName'], 'ADA LOVELACE')
+        self.assertEqual(second['EnableCreateAccount'], 'N')
+
+    def test_the_retry_says_the_lead_may_not_be_attached(self):
+        # The name form is the one that quietly did nothing on this tenant, so
+        # a lead that falls back to it must not look linked on the dashboard.
+        client, _ = self._linking_client(
+            400, 'CustomerId is not a valid field for this operation.'
+        )
+
+        result = client.submit_lead(self._lead(), 'Website/Email', source_label='Inquiry')
+
+        self.assertTrue(any('may leave it unattached' in w
+                            for w in result['field_warnings']))
+
+    def test_a_400_naming_no_link_field_is_not_retried(self):
+        client, session = self._linking_client(400, 'Rank is invalid.')
+
+        with self.assertRaises(oracle_api.OracleApiError):
+            client.submit_lead(self._lead(), 'Website/Email', source_label='Inquiry')
+
+        self.assertEqual(session.post.call_count, 1)
+
     def test_unrelated_400_is_not_retried(self):
         client, session = self._website_client(400, 'Rank is invalid.')
         lead = dict(self._lead(), website='https://dcfusionllc.com')
@@ -892,9 +969,11 @@ class OutlookMarkReviewedToggleTests(unittest.TestCase):
 class ExistingPartyLookupTests(unittest.TestCase):
     """Linking a lead to an account/contact Oracle already has.
 
-    This tenant exposes no CustomerPartyId/PrimaryContactPartyId on leads, so
-    linking is done by sending the record's exact stored name together with
-    EnableCreateAccount/EnableCreateContact = 'N'.
+    By party identifier -- CustomerId for the account, ContactPartyNumber for
+    the contact -- because the name form this used to send does not link. Ten
+    of twelve leads sent with the exact stored name and EnableCreateAccount
+    = 'N' reached Oracle with the flag flipped back to 'Y', no CustomerId and
+    the company left as loose text (audited 2026-09-18).
     """
 
     def _client(self, get_responses):
@@ -911,32 +990,92 @@ class ExistingPartyLookupTests(unittest.TestCase):
         resp.json.return_value = {'items': items}
         return resp
 
-    def test_contact_email_match_links_both_contact_and_account(self):
-        contact = {'PartyId': 1, 'PartyNumber': '15001', 'ContactName': 'GANI BAUTISTA',
-                   'EmailAddress': 'gani.bautista@amerimade.com',
-                   'AccountName': 'AMERIMADE TECHNOLOGY'}
-        client = self._client([self._items([contact])])
+    def _contact(self):
+        return {'PartyId': 1, 'PartyNumber': '15001', 'ContactName': 'PAT QUINLAN',
+                'EmailAddress': 'pat.quinlan@cascadia-mfg.com',
+                'AccountName': 'CASCADIA TECHNOLOGY',
+                'AccountPartyId': 100000055846517, 'AccountPartyNumber': '11620'}
 
-        result = client.resolve_existing_party({'email': 'Gani.Bautista@Amerimade.com',
-                                                'organization': 'Amerimade'})
+    def test_contact_email_match_links_both_contact_and_account(self):
+        client = self._client([self._items([self._contact()])])
+
+        result = client.resolve_existing_party({'email': 'Pat.Quinlan@Cascadia-mfg.com',
+                                                'organization': 'Cascadia'})
 
         self.assertEqual(result['match_basis'], 'contact_email')
-        self.assertEqual(result['contact_name'], 'GANI BAUTISTA')
-        self.assertEqual(result['account_name'], 'AMERIMADE TECHNOLOGY')
+        self.assertEqual(result['contact_name'], 'PAT QUINLAN')
+        self.assertEqual(result['account_name'], 'CASCADIA TECHNOLOGY')
 
-    def test_matched_party_payload_disables_creation(self):
-        existing = {'account_name': 'AMERIMADE TECHNOLOGY',
-                    'contact_name': 'GANI BAUTISTA', 'warnings': []}
+    def test_the_party_identifiers_come_back_with_the_names(self):
+        # The names alone are what left leads attached to nothing.
+        client = self._client([self._items([self._contact()])])
+
+        result = client.resolve_existing_party({'email': 'pat.quinlan@cascadia-mfg.com',
+                                                'organization': 'Cascadia'})
+
+        self.assertEqual(result['account_party_id'], 100000055846517)
+        self.assertEqual(result['contact_party_number'], '15001')
+
+    def test_matched_party_payload_links_by_identifier(self):
+        existing = {'account_name': 'CASCADIA TECHNOLOGY',
+                    'account_party_id': 100000055846517,
+                    'account_party_number': '11620',
+                    'contact_name': 'PAT QUINLAN',
+                    'contact_party_number': '15001', 'warnings': []}
         payload, _, _ = oracle_api.build_lead_payload(
-            {'first_name': 'Gani', 'last_name': 'Bautista', 'organization': 'Amerimade',
+            {'first_name': 'Pat', 'last_name': 'Quinlan', 'organization': 'Cascadia',
              'market': 'INDUSTRIAL'},
             'Website/Email', source_label='Inquiry', existing=existing,
         )
 
-        self.assertEqual(payload['CustomerPartyName'], 'AMERIMADE TECHNOLOGY')
-        self.assertEqual(payload['PrimaryContactPartyName'], 'GANI BAUTISTA')
+        self.assertEqual(payload['CustomerId'], 100000055846517)
+        self.assertEqual(payload['ContactPartyNumber'], '15001')
         self.assertEqual(payload['EnableCreateAccount'], 'N')
         self.assertEqual(payload['EnableCreateContact'], 'N')
+
+    def test_the_matched_names_are_not_sent_alongside_the_identifiers(self):
+        # CustomerPartyName is the attribute Oracle reads as "create an account
+        # called this", which is the opposite of what a match means.
+        existing = {'account_name': 'CASCADIA TECHNOLOGY',
+                    'account_party_id': 100000055846517,
+                    'contact_name': 'PAT QUINLAN',
+                    'contact_party_number': '15001', 'warnings': []}
+        payload, _, _ = oracle_api.build_lead_payload(
+            {'first_name': 'Pat', 'last_name': 'Quinlan', 'organization': 'Cascadia',
+             'market': 'INDUSTRIAL'},
+            'Website/Email', source_label='Inquiry', existing=existing,
+        )
+
+        self.assertNotIn('CustomerPartyName', payload)
+        self.assertNotIn('PrimaryContactPartyName', payload)
+
+    def test_a_party_number_is_never_sent_as_a_customer_id(self):
+        # Account party numbers are strings on this tenant (SCE_150572), and
+        # CustomerId is an integer attribute -- a 400 that would reject the
+        # whole lead.
+        existing = {'account_name': 'ARTHREX (MA)', 'account_party_id': 'SCE_150572',
+                    'warnings': []}
+        payload, _, warnings = oracle_api.build_lead_payload(
+            {'first_name': 'Aiden', 'last_name': 'Sim', 'organization': 'ARTHREX (MA)',
+             'market': 'MEDICAL'},
+            'Website/Email', source_label='Inquiry', existing=existing,
+        )
+
+        self.assertNotIn('CustomerId', payload)
+        self.assertEqual(payload['CustomerPartyName'], 'ARTHREX (MA)')
+        self.assertEqual(payload['EnableCreateAccount'], 'N')
+        self.assertTrue(any('No party ID' in w for w in warnings))
+
+    def test_a_match_with_no_identifier_says_so_on_the_lead(self):
+        # The name form is the one that quietly did nothing, so a lead that
+        # falls back to it carries a warning rather than looking linked.
+        existing = {'account_name': 'CASCADIA TECHNOLOGY', 'warnings': []}
+        _, _, warnings = oracle_api.build_lead_payload(
+            {'first_name': 'Pat', 'organization': 'Cascadia', 'market': 'INDUSTRIAL'},
+            'Website/Email', source_label='Inquiry', existing=existing,
+        )
+
+        self.assertTrue(any('may not resolve' in w for w in warnings))
 
     def test_no_match_still_creates_new_account_and_contact(self):
         payload, _, _ = oracle_api.build_lead_payload(
@@ -950,46 +1089,80 @@ class ExistingPartyLookupTests(unittest.TestCase):
         self.assertEqual(payload['EnableCreateContact'], 'Y')
 
     def test_single_exact_account_links_account_only(self):
+        account = {'PartyId': 300000107657584, 'PartyNumber': 'SCE_1299118',
+                   'OrganizationName': 'SLB'}
         client = self._client([
-            self._items([]),                                             # no contact
-            self._items([{'PartyNumber': 'SCE_1299118', 'OrganizationName': 'SLB'}]),  # exact
-            self._items([{'PartyNumber': 'SCE_1299118', 'OrganizationName': 'SLB'}]),  # prefix
+            self._items([]),           # no contact
+            self._items([account]),    # exact
+            self._items([account]),    # prefix
         ])
 
         result = client.resolve_existing_party({'email': 'new@slb.com', 'organization': 'SLB'})
 
         self.assertEqual(result['match_basis'], 'account_name_exact')
         self.assertEqual(result['account_name'], 'SLB')
+        self.assertEqual(result['account_party_id'], 300000107657584)
+        self.assertEqual(result['account_party_number'], 'SCE_1299118')
         self.assertIsNone(result['contact_name'])
 
-    def test_ambiguous_company_creates_new_and_warns_with_candidates(self):
+    def test_company_name_normalization_and_similarity(self):
+        self.assertEqual(oracle_api.normalize_company_name('Acme Corporation, Inc.'), 'ACME')
+        self.assertEqual(oracle_api.normalize_company_name('Motion Control Products LLC'), 'MOTION CONTROL PRODUCTS')
+        
+        # Suffix variations are normalized to high similarity
+        score = oracle_api.calculate_company_similarity('Acme Corp', 'Acme Corporation Inc.')
+        self.assertEqual(score, 1.0)
+        
+        # Unrelated prefix matches yield low similarity score
+        score_unrelated = oracle_api.calculate_company_similarity('Cat', 'Catering Services Inc')
+        self.assertLess(score_unrelated, 0.80)
+
+    def test_stringent_company_similarity_filtering_ignores_unrelated_prefix_hits(self):
+        raw_prefix = [
+            {'PartyNumber': '1', 'OrganizationName': 'Catering Services Inc'},
+            {'PartyNumber': '2', 'OrganizationName': 'Catalent Corp'},
+            {'PartyNumber': '3', 'OrganizationName': 'Cat Hydraulic Systems Inc'},
+        ]
+        client = self._client([
+            self._items([]),          # no contact
+            self._items([]),          # no exact account
+            self._items(raw_prefix),  # raw SQL prefix candidates
+        ])
+
+        result = client.resolve_existing_party({'email': 'john@cat.com', 'organization': 'Cat'})
+
+        # Only 'Cat Hydraulic Systems Inc' passes stringent similarity matching (>= 0.80)
+        self.assertEqual(result['match_basis'], 'ambiguous')
+        warning = result['warnings'][0]
+        self.assertIn('resembles 1 existing Oracle', warning)
+        self.assertIn('Cat Hydraulic Systems Inc', warning)
+        self.assertNotIn('Catering Services', warning)
+
+    def test_ambiguous_company_blocks_submission_unless_bypass_dedup(self):
         prefix = [{'PartyNumber': str(i), 'OrganizationName': f'MOTION VARIANT {i}'}
-                  for i in range(10)]
+                  for i in range(2)]
         client = self._client([
             self._items([]),        # no contact
             self._items([]),        # no exact account
-            self._items(prefix),    # many prefix candidates
+            self._items(prefix),    # prefix candidates
         ])
 
-        result = client.resolve_existing_party({'email': 'x@motion.com', 'organization': 'Motion'})
-
-        self.assertEqual(result['match_basis'], 'ambiguous')
-        self.assertIsNone(result['account_name'])
-        self.assertIsNone(result['contact_name'])
-        warning = result['warnings'][0]
-        self.assertIn('resembles 10 existing Oracle', warning)
-        self.assertIn('MOTION VARIANT 0', warning)
+        # Without bypass_dedup (force_submit=0), submit_lead blocks creation of a new company
+        with self.assertRaises(oracle_api.OracleApiError) as ctx:
+            client.submit_lead({'first_name': 'Ada', 'organization': 'Motion',
+                                'email': 'x@motion.com', 'market': 'INDUSTRIAL'},
+                               'Website/Email', source_label='Inquiry', bypass_dedup=False)
+        self.assertIn('Submission blocked', str(ctx.exception))
+        self.assertIn('resembles 2 existing Oracle', str(ctx.exception))
 
     def test_ambiguous_warning_gets_its_own_notification_headline(self):
         from dashboard.app import _build_alert
-        lead = {'id': 1, 'status': 'submitted', 'first_name': 'Ada', 'organization': 'Motion',
-                'field_warnings': json.dumps([
-                    "Company 'Motion' resembles 62 existing Oracle account(s) but none "
-                    'matched exactly, so a new account was created.'
-                ])}
+        lead = {'id': 1, 'status': 'pending_review', 'first_name': 'Ada', 'organization': 'Motion',
+                'submit_error': "Submission blocked: Company 'Motion' resembles 2 existing Oracle account(s) ('MOTION VARIANT 0', 'MOTION VARIANT 1'). Choose whether to assign to an existing company or create as a new company."}
         alert = _build_alert(lead)
         self.assertEqual(alert['severity'], 'warning')
-        self.assertIn('Possible duplicate account', alert['headline'])
+        self.assertIn('Ambiguous company match', alert['headline'])
+        self.assertEqual(alert['candidates'], ['MOTION VARIANT 0', 'MOTION VARIANT 1'])
 
     def test_lookup_failure_blocks_creation_so_it_can_retry_safely(self):
         session = MagicMock()

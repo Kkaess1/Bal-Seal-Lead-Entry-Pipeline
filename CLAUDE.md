@@ -81,6 +81,15 @@ Outlook (COM) --> pipeline_ingest.py --> SQLite --> dashboard/app.py --> pipelin
   list, rank/market rules and territory map with ingest, but deliberately skips the
   fraud screen and the head-office lookup. README "Entering a lead by hand" says why,
   and why that does not contradict "One way in".
+- **`spreadsheet_import.py`** — Import spreadsheet on Pending Review: a trade-show
+  lead list, read by the model (a layout pass, then ten rows per call) and every
+  answer checked against its own row before it reaches a lead. Only an explicit
+  Cold row is skipped. Leads carry `trade_show`, which titles them in Oracle as
+  `COMPANY - Contact - Tradeshow - <show>`. The upload asks where the leads are
+  from (Oracle Lead Source, default Trade Shows). Runs as a background job.
+  README "Importing a spreadsheet".
+- **Lead Source is per lead**, via `oracle_api.lead_source_for()`: a chosen
+  `lead_source` wins, a lead with a trade show is Trade Shows, else Website.
 
 ### lead_stages.py is the single source of truth for status
 
@@ -132,7 +141,8 @@ putting it behind real auth; do not weaken the loopback guard without reading it
 ## AI conventions
 
 One pinned model in `ai_provider.DEFAULT_OPENAI_MODEL`, used by every caller
-(`lead_extractor` on both its paths, `fraud_screen`, `ai_column_mapper`); none
+(`lead_extractor` on both its paths, `fraud_screen`, `ai_column_mapper`,
+`spreadsheet_import`); none
 passes an override. `call_llm_with_images()` is the same model with a screenshot
 attached — the Responses API needs the role/content-parts form once an image is
 there, which is why it is a separate function rather than an argument. The
@@ -188,9 +198,11 @@ The repo is private and holds real customer data on disk. `.gitignore` covers
 `email_cache/`, `email_attachments/`, `email_messages/`, `input/`, `logs/`, and
 `reference/*` except its README.
 
-Check what is actually staged before any `git add -A`. Scratch and one-off scripts
-(`scratch_*.py`, `backfill_*.py`, `verify_*.py`) are left untracked on purpose;
-several produce JSON containing customer names.
+Check what is actually staged before any `git add -A`. The `scratch_*.py` Oracle
+scripts are tracked, but what they write is not: their JSON and .xlsx output
+holds customer names, and `.gitignore` names `scratch_*.json` / `scratch_*.xlsx`
+explicitly for that reason. One-off backfill and check scripts are deleted once
+they have run (2026-09-28); git history keeps them.
 
 `purge_old_leads.py` deletes customer data permanently and writes no backup, which
 is the point of it. It defaults to a dry run for the same reason the Oracle write

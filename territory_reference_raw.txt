@@ -10,6 +10,7 @@ no longer match the PDF word for word:
   * 2026-08-10: Lisa Wolf left; the Americas (Rest of World) list passed to John Pan.
   * 2026-08-14: Daniel Smoliga was replaced by John Pan, who held NORTHEAST.
   * 2026-08-18: John Pan's NORTHEAST territories (CT, DE, MA, ME, NH, NJ, NY, PA Zip 17000 & Above, RI, VT, NL, NS, QC) transferred to Bill Rost.
+  * 2026-09-28: Jeff Frederick left; SOUTHERN CALIFORNIA (CA Zip 93599 & Below, AZ, NM, NV Clark County) passed to John Pan.
 Reflected in territory_map.py. Reconcile when the sheet is reissued.
 
 An earlier plain-text paste of the same table (before the PDF was supplied) lost its
@@ -18,7 +19,7 @@ naive reconstruction of that paste would have put Israel and Austria under Serda
 which is wrong; the real table (below) puts both under Davide Amato.
 
 === US Sales Territory ===
-Columns: Bill Rost (NORTHEAST & MIDEAST) | Brian Carter (WEST) | Jeff Frederick (SOUTHERN CALIFORNIA)
+Columns: Bill Rost (NORTHEAST & MIDEAST) | Brian Carter (WEST) | John Pan (SOUTHERN CALIFORNIA)
 | Mark Copeland (SOUTH) | Wade Kahout (MIDWEST) | John Pan (AMERICAS)
 
 Bill Rost (NORTHEAST & MIDEAST): Connecticut, Delaware, Massachusetts, Maine, New Hampshire,
@@ -29,7 +30,7 @@ Brian Carter (WEST): Alaska, CA Zip 93600 & Above, Colorado, Hawaii, Idaho, Mont
 Oregon, Utah, Washington, Wyoming, AB (Canada), BC (Canada), NWT (Canada), SK (Canada),
 Yukon (Canada), Nevada (not Clark County)
 
-Jeff Frederick (SOUTHERN CALIFORNIA): CA Zip 93599 & Below, Arizona, New Mexico,
+John Pan (SOUTHERN CALIFORNIA): CA Zip 93599 & Below, Arizona, New Mexico,
 Nevada (Clark County)
 
 Mark Copeland (SOUTH): Alabama, Arkansas, Florida, Georgia, Louisiana, Maryland,

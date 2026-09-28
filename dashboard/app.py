@@ -6,6 +6,7 @@ Run:  py dashboard/app.py          (dev, Flask's own server)
 Binds to 127.0.0.1 only -- single-user local tool, not exposed on the network.
 """
 
+import io
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import (
-    Flask, abort, flash, redirect, render_template, request, send_file,
+    Flask, Request, abort, flash, redirect, render_template, request, send_file,
     send_from_directory, session, url_for,
 )
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -36,12 +37,33 @@ import outlook_ingest  # noqa: E402
 import retention  # noqa: E402
 import review_marking  # noqa: E402
 import secrets_store  # noqa: E402
+import spreadsheet_import  # noqa: E402
 import territory_map  # noqa: E402
 # The same rules the submitter enforces, so the dashboard cannot approve a
 # lead that Oracle would then refuse. One definition, checked in both places.
-from oracle_api import submission_blockers  # noqa: E402
+from oracle_api import LEAD_SOURCE_VALUES, submission_blockers  # noqa: E402
+
+class _Request(Request):
+    """
+    Keeps an uploaded spreadsheet of leads in memory while the form is parsed.
+
+    Werkzeug spools any upload over 500 KB to a temporary file, so a customer
+    list "parsed from memory" was in fact written to %TEMP% first -- deleted
+    on close, but left behind by a crash, and a folder of PII that retention
+    knows nothing about. MAX_CONTENT_LENGTH bounds what this can hold.
+    """
+
+    def _get_file_stream(self, total_content_length, content_type,
+                         filename=None, content_length=None):
+        if self.endpoint == 'import_leads':
+            return io.BytesIO()
+        return super()._get_file_stream(
+            total_content_length, content_type, filename, content_length,
+        )
+
 
 app = Flask(__name__)
+app.request_class = _Request
 app.secret_key = secrets_store.get_secret('DASHBOARD_SECRET_KEY') or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
@@ -94,7 +116,8 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_REFERENCE_UPLOAD_BYTES
 
 LEAD_FIELD_GROUPS = [
     ('Contact', ['first_name', 'last_name', 'title', 'email', 'phone', 'phone_mobile']),
-    ('Company', ['organization', 'website', 'market', 'campaign', 'rank']),
+    ('Company', ['organization', 'website', 'market', 'campaign', 'rank', 'trade_show',
+                 'lead_source']),
     ('Location', ['address1', 'address2', 'city', 'state', 'zip', 'country']),
     ('Qualification', [
         'notes_action', 'notes_body', 'survey_answers', 'qualifiers',
@@ -554,7 +577,7 @@ def _decorate(lead):
         lead['recipients_display'] = lead['other_recipients_label']
     elif lead['recipients_known']:
         lead['recipients_display'] = 'None (Sales inbox only)'
-    elif lead.get('source') == 'email_excel_attachment':
+    elif lead.get('source') in ('email_excel_attachment', spreadsheet_import.SOURCE):
         lead['recipients_display'] = 'N/A (Spreadsheet upload)'
     elif lead.get('source') == manual_lead_module.SOURCE:
         lead['recipients_display'] = 'N/A (Entered by hand)'
@@ -668,6 +691,33 @@ def _lead_label(lead):
     )
 
 
+def _extract_company_candidates(text):
+    """
+    Extract candidate company names from warning/error text, e.g.
+    "resembles 2 existing Oracle account(s) ('Acme Corp', 'Acme Corporation')."
+
+    The names are read back out of the quotes repr() put them in, rather than
+    by reading up to the next bracket and splitting on commas. Oracle account
+    names routinely contain both: 'LOCKHEED MARTIN (1389119)' came back as
+    'LOCKHEED MARTIN (1389119', and assigning a lead to a name no account has
+    put it straight back into the same ambiguous-match block -- the loop the
+    Assign button was meant to end. repr() switches to double quotes for a
+    name holding an apostrophe ("O'BRIEN MEDICAL"), so both quotings count.
+    """
+    if not text:
+        return []
+    listing = re.search(r'account\(s\)\s*\(', text)
+    if not listing:
+        return []
+    names = re.findall(r"'([^']*)'|\"([^\"]*)\"", text[listing.end():])
+    return [(single or double).strip()
+            for single, double in names
+            if (single or double).strip() and not (single or double).startswith('+')]
+
+
+app.jinja_env.filters['extract_company_candidates'] = _extract_company_candidates
+
+
 def _build_alert(lead):
     """
     Turn a lead needing attention into a notification the operator can act on.
@@ -709,11 +759,17 @@ def _build_alert(lead):
     # Review, editable, with the reason on its card. Headline says so, because
     # "Submission failed" reads as something the operator has lost.
     if status == 'pending_review' and (lead.get('submit_error') or '').strip():
+        err = lead.get('submit_error') or ''
+        ambiguous = 'resembles' in err
+        headline = 'Ambiguous company match — choose action' if ambiguous else 'Returned to Pending Review — needs a correction'
+        candidates = _extract_company_candidates(err)
         return {
             'lead_id': lead['id'], 'name': name, 'severity': 'warning',
-            'headline': 'Returned to Pending Review — needs a correction',
-            'detail': lead.get('submit_error') or 'No error detail recorded.',
+            'headline': headline,
+            'detail': err or 'No error detail recorded.',
             'organization': lead.get('organization'),
+            'can_send_anyway': ambiguous,
+            'candidates': candidates,
         }
     if status == 'failed':
         return {
@@ -865,10 +921,99 @@ def send_anyway(lead_id):
     db.mark_lead_for_force_submit(lead_id)
     _start_submit_run()
     flash(
-        f'{_lead_label(lead)} will be submitted to Oracle (bypassing duplicate checks).',
+        f'{_lead_label(lead)} will be submitted to Oracle as a new company (bypassing duplicate checks).',
         'submit_success',
     )
-    return redirect(request.referrer or url_for('history'))
+    return redirect(request.referrer or url_for('index'))
+
+
+@app.route('/leads/<int:lead_id>/assign_company', methods=['POST'])
+def assign_company(lead_id):
+    """The other answer to an ambiguous company match: use the account Oracle
+    already has, instead of creating a second one.
+
+    The lead is renamed to that account's exact name, because an exact name is
+    what resolve_existing_party() links on -- anything that merely resembles an
+    account is what blocked the lead in the first place. So the name has to
+    arrive here intact; _extract_company_candidates() truncating one at a
+    bracket is what made this button loop.
+
+    Sends straight to Oracle, like "Create as New Company" beside it: the
+    operator has just answered the only question holding the lead up, and
+    parking it in the Input Queue for a second confirmation only looked like
+    the click had done nothing.
+    """
+    lead = db.get_lead(lead_id)
+    if not lead:
+        abort(404)
+    company_name = request.form.get('company_name', '').strip()
+    if not company_name:
+        flash('Please select or specify a valid company name.', 'assign_error')
+        return redirect(request.referrer or url_for('index'))
+
+    status = (lead.get('status') or '').strip()
+    if status not in lead_stages.EDITABLE and status not in lead_stages.RECALLABLE:
+        # 'submitting' above all: a run may be mid-POST with this lead, and
+        # renaming its company underneath it is the one edit that cannot be
+        # undone from here.
+        flash(
+            f'{_lead_label(lead)} cannot be reassigned from its current state '
+            f'({lead_stages.page_of(status) or status}).',
+            'submit_error',
+        )
+        return redirect(request.referrer or url_for('index'))
+
+    db.update_lead_fields(lead_id, {
+        'organization': company_name,
+        'submit_error': None,
+        'force_submit': 0,
+    })
+
+    # The same gate every other route to Oracle passes through: the rename can
+    # be the edit that completes a lead, and it can also be made on a lead that
+    # was never sendable for an unrelated reason.
+    blockers = submission_blockers(dict(lead, organization=company_name))
+    if blockers:
+        db.return_lead_for_correction(lead_id, 'Cannot approve: ' + ' '.join(blockers))
+        flash(
+            f'{_lead_label(lead)} is assigned to {company_name!r} but is back in '
+            f'Pending Review for a correction: {" ".join(blockers)}',
+            'submit_error',
+        )
+        return redirect(request.referrer or url_for('index'))
+
+    if status in lead_stages.EDITABLE:
+        db.approve_lead(
+            lead_id,
+            reviewed_by=request.form.get('reviewed_by') or 'dashboard',
+            review_notes=f'Assigned to existing Oracle company {company_name!r}',
+            status='review_approved',
+        )
+        db.finalize_approved_batch(reviewed_by='dashboard', lead_ids=[lead_id])
+    else:
+        # Already past staging ('approved' or 'failed' in the Input Queue):
+        # finalize_approved_batch() would not see it, and leaving it alone left
+        # a failed lead sitting with its old error.
+        db.update_lead_fields(lead_id, {
+            'status': 'approved',
+            'submitting_started_at': None,
+            'next_attempt_at': None,
+        })
+    db.dismiss_lead_alert(lead_id)
+    review_marking.maybe_mark_email_reviewed(lead_id)
+
+    if not _start_submit_run():
+        flash(
+            f'{_lead_label(lead)} is assigned to {company_name!r} and approved, but '
+            'the Oracle submission could not be started. Use "Send to Oracle now".',
+            'submit_error',
+        )
+        return redirect(request.referrer or url_for('index'))
+    flash(
+        f'{_lead_label(lead)} assigned to existing company {company_name!r} and sent to Oracle.',
+        'submit_success',
+    )
+    return redirect(request.referrer or url_for('index'))
 
 
 @app.route('/')
@@ -1044,6 +1189,105 @@ def create_lead():
         )
     flash(message, 'manual_success' if found else 'manual_error')
     return redirect(url_for('index', _anchor=f'lead-card-{lead_id}'))
+
+
+@app.route('/leads/import')
+def import_form():
+    """The form for turning a spreadsheet of trade-show leads into Pending
+    Review cards."""
+    if not (secrets_store.get_secret('OPENAI_API_KEY') or secrets_store.get_secret('CHATGPT_API')):
+        flash('No OpenAI key is configured. The sheet will be read by its column '
+              'headers only, which gets unusual layouts wrong -- check every lead.',
+              'import_error')
+    return render_template(
+        'import_leads.html',
+        lead_sources=spreadsheet_import.LEAD_SOURCES,
+        default_lead_source=spreadsheet_import.DEFAULT_LEAD_SOURCE,
+        max_rows=spreadsheet_import.MAX_ROWS,
+        max_mb=spreadsheet_import.MAX_UPLOAD_BYTES // (1024 * 1024),
+    )
+
+
+@app.route('/leads/import', methods=['POST'])
+def import_leads():
+    """
+    Check an uploaded workbook and start importing it in the background.
+
+    Not synchronous like create_lead(): the model reads the sheet ten rows at
+    a time, and a few hundred rows is minutes of calls -- longer than a browser
+    will hold a request open. The file is checked here, so a wrong one is
+    refused at once, and the operator lands on a progress page.
+    """
+    upload = request.files.get('workbook')
+    if not upload or not upload.filename:
+        flash('Choose a spreadsheet to import.', 'import_error')
+        return redirect(url_for('import_form'))
+
+    # One byte past the limit is enough to know a file is too big. The body
+    # is already parsed by now (in memory -- see _Request), bounded by
+    # MAX_CONTENT_LENGTH; this only avoids copying all of it a second time.
+    data = upload.read(spreadsheet_import.MAX_UPLOAD_BYTES + 1)
+    try:
+        job_id = spreadsheet_import.start_import(
+            data, upload.filename, reviewed_by='dashboard',
+            fallback_trade_show=request.form.get('trade_show'),
+            lead_source=request.form.get('lead_source'),
+        )
+    except spreadsheet_import.ImportError_ as exc:
+        flash(str(exc), 'import_error')
+        return redirect(url_for('import_form'))
+    except Exception:
+        app.logger.exception('Could not start importing spreadsheet %r', upload.filename)
+        flash('Could not import the spreadsheet. Check the dashboard log.', 'import_error')
+        return redirect(url_for('import_form'))
+    return redirect(url_for('import_progress', job_id=job_id))
+
+
+@app.route('/leads/import/<job_id>')
+def import_progress(job_id):
+    """Where the operator waits while a workbook is read. Polls
+    import_status() and moves on to import_finish() by itself."""
+    job = spreadsheet_import.job_status(job_id)
+    if job is None:
+        flash('That import is no longer running. Check Pending Review for its leads.',
+              'import_error')
+        return redirect(url_for('import_form'))
+    return render_template('import_progress.html', job=job)
+
+
+@app.route('/leads/import/<job_id>/status')
+def import_status(job_id):
+    job = spreadsheet_import.job_status(job_id)
+    if job is None:
+        return {'state': 'missing'}, 404
+    return {key: job[key] for key in ('state', 'stage', 'done', 'total')}
+
+
+@app.route('/leads/import/<job_id>/finish')
+def import_finish(job_id):
+    """
+    Turn a finished job into a message on the page it belongs on.
+
+    Success goes to Pending Review, where the new leads are checked and
+    approved; a failure goes back to the form with the reason.
+    """
+    job = spreadsheet_import.job_status(job_id)
+    if job is None:
+        flash('That import is no longer running. Check Pending Review for its leads.',
+              'import_error')
+        return redirect(url_for('import_form'))
+    if job['state'] == 'running':
+        return redirect(url_for('import_progress', job_id=job_id))
+    if job['state'] == 'failed':
+        flash(job['error'], 'import_error')
+        return redirect(url_for('import_form'))
+
+    message, created = spreadsheet_import.summarize(job['result'])
+    if not created:
+        flash(message, 'import_error')
+        return redirect(url_for('import_form'))
+    flash(message, 'import_success')
+    return redirect(url_for('index', _anchor=f"lead-card-{job['result']['lead_ids'][0]}"))
 
 
 @app.route('/queue')
@@ -1246,7 +1490,8 @@ def lead_detail(lead_id):
     return render_template('lead_detail.html', lead=lead, duplicate_of=duplicate_of,
                             schema_fields=db.LEAD_SCHEMA_FIELDS,
                             field_groups=LEAD_FIELD_GROUPS,
-                            territory_managers=territory_map.TERRITORY_MANAGERS)
+                            territory_managers=territory_map.TERRITORY_MANAGERS,
+                            lead_source_options=sorted(LEAD_SOURCE_VALUES))
 
 
 @app.route('/leads/<int:lead_id>/save', methods=['POST'])
@@ -1260,6 +1505,9 @@ def save_lead(lead_id):
     if (posted_tm and
             posted_tm not in territory_map.TERRITORY_MANAGERS):
         abort(400, 'Invalid Territory Manager')
+    posted_source = request.form.get('lead_source')
+    if posted_source and posted_source not in LEAD_SOURCE_VALUES:
+        abort(400, 'Invalid Lead Source')
     edited = {}
     for field in db.LEAD_SCHEMA_FIELDS:
         if field in request.form:
@@ -2049,8 +2297,9 @@ def upload_too_large(error):
     """A too-large upload should say so on the page it came from, rather than
     dropping the operator onto a bare 413.
 
-    MAX_CONTENT_LENGTH caps every request body, so two pages can raise this:
-    the Reference tab and the screenshot box on Create Lead. Answering both
+    MAX_CONTENT_LENGTH caps every request body, so three pages can raise
+    this: the Reference tab, the screenshot box on Create Lead, and Import
+    spreadsheet. Answering both
     from the reference page sent an operator who had just attached a large
     screenshot to a tab about territory maps, carrying a flash category that
     page does not render -- so the error vanished and the lead simply never
@@ -2060,6 +2309,9 @@ def upload_too_large(error):
     if (request.endpoint or '') == 'create_lead':
         flash(message, 'manual_error')
         return redirect(url_for('new_lead'))
+    if (request.endpoint or '') == 'import_leads':
+        flash(message, 'import_error')
+        return redirect(url_for('import_form'))
     flash(message, 'reference_error')
     return redirect(url_for('reference'))
 

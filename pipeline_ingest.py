@@ -222,7 +222,9 @@ def _process_body_text(message_row_id, msg, force=False, attachment_scan=None):
                            msg['id'], source_language, exc)
 
     lead = dict(extraction.get('fields') or {})
-    if not lead.get('email'):
+    # Not when the sender is us: a web-form relay or a colleague's forward
+    # would otherwise make leads@bse-web.com the customer's address.
+    if not lead.get('email') and not lead_extractor.is_own_address(msg['sender_email']):
         lead['email'] = msg['sender_email']
 
     lead['lead_details'] = email_cleaner.clean_email_body(display_body)

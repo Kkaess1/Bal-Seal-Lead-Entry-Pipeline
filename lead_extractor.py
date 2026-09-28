@@ -48,6 +48,21 @@ FIELDS_TO_EXTRACT = [
     'rank', 'market',
 ]
 
+# Our own mail domains. An address on one of these is never the lead's contact:
+# it is the mailbox the enquiry was sent TO (sales@), the website form's relay
+# (leads@bse-web.com, which sends most of our leads), or a colleague forwarding
+# a customer on. Before 2026-09-28, 100 leads carried one of these as the
+# contact email -- the model reading sales@ off a To: line, or ingest falling
+# back to a sender that was us.
+OWN_EMAIL_DOMAINS = {'balseal.com', 'balseal.co.uk', 'balseal.nl', 'bse-web.com'}
+
+
+def is_own_address(email):
+    """True for an address at one of OWN_EMAIL_DOMAINS, or a subdomain of one."""
+    domain = str(email or '').strip().lower().rpartition('@')[2].rstrip('>').strip()
+    return any(domain == d or domain.endswith('.' + d) for d in OWN_EMAIL_DOMAINS)
+
+
 _PLAUSIBILITY_LABELS = {
     'poor_spelling': 'Poor spelling/grammar',
     'no_engineering_specs': 'No engineering specs',
@@ -71,6 +86,9 @@ FIELD_DESCRIPTIONS = {
     # number between them in a live comparison against the old prompt.
     'phone': 'primary/work number, exactly as written',
     'phone_mobile': 'mobile/cell number, exactly as written, only if given separately',
+    # Our own addresses are dropped in validate_fields(), not asked for here:
+    # the prompt has no room under PromptSizeTests for a clause that would
+    # say it reliably, and a filter cannot be talked out of it.
     'email': "the contact's own address (usually the sender's)",
     'website': 'company URL, only if explicitly provided',
     # Split the address exactly as the email lays it out. Without this, a
@@ -152,6 +170,11 @@ def validate_fields(raw_fields):
             validated['market'] = match
         else:
             validated.pop('market')
+
+    # Blank is better than ours: a blank email is a gap a reviewer fills, but
+    # sales@balseal.com is a lead Oracle would file against our own inbox.
+    if is_own_address(validated.get('email')):
+        validated.pop('email')
 
     return validated
 

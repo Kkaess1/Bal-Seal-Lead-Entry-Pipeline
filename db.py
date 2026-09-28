@@ -31,6 +31,15 @@ LEAD_SCHEMA_FIELDS = [
     'email', 'website', 'address1', 'address2', 'city', 'state', 'zip', 'country',
     'notes_action', 'notes_body', 'survey_answers', 'qualifiers', 'rank',
     'scan_device', 'lead_details', 'campaign', 'assigned_tm', 'market',
+    # The show a lead was met at, as its lead list names it. Fills the last
+    # part of the Oracle project name ("... - Tradeshow - Space Tech Expo");
+    # see pipeline_submit._project_label(). Set by spreadsheet_import.py and
+    # editable on the review form like any other field.
+    'trade_show',
+    # Oracle's Lead Source, when one was chosen for this lead (the upload
+    # form's "where are these leads from", or the review form). Empty means
+    # decided at submission -- see oracle_api.lead_source_for().
+    'lead_source',
 ]
 
 LEAD_STATUSES = (
@@ -831,6 +840,37 @@ def insert_lead(lead, source, message_id=None, source_row_number=None,
         if owns_conn:
             conn.commit()
         return cur.lastrowid
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def existing_ingest_keys(ingest_keys, conn=None):
+    """
+    The subset of `ingest_keys` that already belong to a lead.
+
+    insert_lead() quietly returns the existing row for a key it has seen, which
+    is right for idempotency but leaves a caller unable to say "12 of these
+    were already imported". Asked up front instead, in one query per chunk.
+    """
+    keys = [k for k in dict.fromkeys(ingest_keys) if k]
+    if not keys:
+        return set()
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        found = set()
+        # Under SQLite's default bound-parameter limit.
+        for start in range(0, len(keys), 500):
+            chunk = keys[start:start + 500]
+            placeholders = ', '.join('?' for _ in chunk)
+            found.update(
+                row['ingest_key'] for row in conn.execute(
+                    f'SELECT ingest_key FROM leads WHERE ingest_key IN ({placeholders})',
+                    chunk,
+                )
+            )
+        return found
     finally:
         if owns_conn:
             conn.close()

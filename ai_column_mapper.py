@@ -16,6 +16,7 @@ CACHE_FILE = Path(__file__).parent / '.column_cache.json'
 
 # The fields AI should map to (mirrors COLUMN_ALIASES keys in excel_parser.py)
 KNOWN_FIELDS = [
+    'full_name',
     'first_name',
     'last_name',
     'organization',
@@ -38,6 +39,7 @@ KNOWN_FIELDS = [
 ]
 
 FIELD_DESCRIPTIONS = {
+    'full_name':    'Contact full name in a single column (only when there is no separate first/last name column)',
     'first_name':   'Contact first/given name',
     'last_name':    'Contact last/family/surname',
     'organization': 'Company, account, employer, or organization name',

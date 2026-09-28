@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% block title %}Importing Spreadsheet{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('index') }}">&larr; back to pending review</a></p>
+
+  <div class="page-head">
+    <h2>Importing {{ job.filename }}</h2>
+  </div>
+
+  <div class="card">
+    <div class="ingest-loading-container active" role="status" aria-live="polite">
+      <div class="ingest-loading-header">
+        <div class="ingest-spinner"></div>
+        <span id="import-stage">{{ job.stage }}…</span>
+      </div>
+      <div class="ingest-progress-bar-bg">
+        <div class="ingest-progress-bar-fill"></div>
+      </div>
+    </div>
+    <p class="meta" style="margin: 0.75rem 0 0;">
+      The AI reads the sheet's layout, then every row, and each answer is
+      checked against the row it came from. A long list can take a few minutes.
+      You can leave this page — the import carries on, and its leads appear on
+      Pending Review when it finishes.
+    </p>
+  </div>
+
+  <script>
+    (function() {
+      var stage = document.getElementById('import-stage');
+      var statusUrl = {{ url_for('import_status', job_id=job.id)|tojson }};
+      var finishUrl = {{ url_for('import_finish', job_id=job.id)|tojson }};
+      var poll = function() {
+        fetch(statusUrl, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+          .then(function(response) { return response.json(); })
+          .then(function(job) {
+            if (job.state !== 'running') {
+              window.location = finishUrl;
+              return;
+            }
+            stage.textContent = job.total
+              ? job.stage + ' — ' + job.done + ' of ' + job.total + ' rows…'
+              : job.stage + '…';
+            setTimeout(poll, 1500);
+          })
+          .catch(function() { setTimeout(poll, 3000); });
+      };
+      setTimeout(poll, 1000);
+    })();
+  </script>
+{% endblock %}

@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+{% block title %}Import Spreadsheet{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('index') }}">&larr; back to pending review</a></p>
+
+  <div class="page-head">
+    <h2>Import leads from a spreadsheet</h2>
+  </div>
+
+  {% for message in get_flashed_messages(category_filter=['import_error']) %}
+    <div class="forward-notice forward-notice-error" role="alert">{{ message }}</div>
+  {% endfor %}
+
+  <div class="card">
+    <form method="post" action="{{ url_for('import_leads') }}"
+          enctype="multipart/form-data" id="import-form">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+      <fieldset class="edit-section">
+        <legend>Choose the workbook</legend>
+        <label class="edit-field edit-field-wide">
+          <span>Excel or CSV file <span class="label-optional">(.xlsx or .csv, up to {{ max_rows }} leads and {{ max_mb }} MB)</span></span>
+          <input type="file" name="workbook" id="import-workbook" required
+                 accept=".xlsx,.xlsm,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv">
+        </label>
+        <p class="meta" style="margin: 0.5rem 0 0;">
+          Any layout works. The AI reads the whole workbook &mdash; every sheet,
+          title rows, combined columns like &ldquo;City, State ZIP&rdquo; &mdash;
+          and fills in each lead's contact, company, location, rank and market.
+          Everything it reads is checked against the row it came from, and any
+          column it did not use is kept word for word in the lead's details.
+        </p>
+        <p class="meta" style="margin: 0.5rem 0 0;">
+          Every row becomes a lead unless it is explicitly marked Cold. Uploading
+          the same file again does not create duplicates. Every lead lands on
+          Pending Review and still has to be approved.
+        </p>
+      </fieldset>
+
+      <fieldset class="edit-section">
+        <legend>Where are these leads from?</legend>
+        <label class="edit-field edit-field-wide">
+          <span>Lead source <span class="label-optional">(sent to Oracle as every lead's Lead Source)</span></span>
+          <select name="lead_source" id="import-lead-source" required>
+            {% for value in lead_sources %}
+              <option value="{{ value }}"{% if value == default_lead_source %} selected{% endif %}>{{ value }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </fieldset>
+
+      <fieldset class="edit-section" id="import-show-section">
+        <legend>Trade show</legend>
+        <label class="edit-field edit-field-wide">
+          <span>Show name <span class="label-optional">(optional &mdash; only used if the spreadsheet does not name the show)</span></span>
+          <input type="text" name="trade_show" maxlength="120"
+                 placeholder="e.g. Space Tech Expo">
+        </label>
+        <p class="meta" style="margin: 0.35rem 0 0;">
+          Each lead goes to Oracle as &ldquo;Company - Contact - Tradeshow - Show name&rdquo;.
+          The show is read from the workbook itself; this box is a fallback for a
+          list that never says which show it is from.
+        </p>
+      </fieldset>
+
+      <div class="actions" style="margin-top: 1.5rem;">
+        <button type="submit" class="btn-approve btn-lg" id="import-submit">Analyze and import</button>
+        <a class="btn btn-secondary" href="{{ url_for('index') }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    (function() {
+      var form = document.getElementById('import-form');
+      var submit = document.getElementById('import-submit');
+      if (!form || !submit) return;
+
+      // The show name only means something for a trade-show list; for any
+      // other source the server ignores it, so the box is not offered.
+      var source = document.getElementById('import-lead-source');
+      var showSection = document.getElementById('import-show-section');
+      var syncShow = function() {
+        showSection.hidden = source.value !== {{ default_lead_source|tojson }};
+      };
+      source.addEventListener('change', syncShow);
+      syncShow();
+      // Uploading and checking the file takes a moment before the progress
+      // page appears, and a second click would upload it again.
+      form.addEventListener('submit', function() {
+        submit.disabled = true;
+        submit.textContent = 'Uploading…';
+      });
+    })();
+  </script>
+{% endblock %}

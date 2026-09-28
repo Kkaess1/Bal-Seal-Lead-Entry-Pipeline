@@ -25,6 +25,11 @@ in is the opposite of that: it happens one lead at a time, only when someone
 clicks, it is stamped `source='manual_entry'`, and it still has to be
 approved by hand like every other lead. Nothing about it runs unattended.
 
+**Import spreadsheet** (2026-09-28) is the same exception in bulk: a reviewer
+chooses a file and every row becomes a Pending Review lead stamped
+`source='spreadsheet_upload'`. It is still one person, one click, and every
+lead still needs approving. See "Importing a spreadsheet".
+
 **The green tag is the only thing that stops an email being ingested.** Every
 other new message in the Sales inbox is pulled in and staged in Pending
 Review — including a reply to a thread that was handled weeks ago, a reply to
@@ -137,6 +142,105 @@ API outage.
 
 In Oracle these arrive labelled `Inquiry - Manual Entry`, so a hand-entered
 lead is distinguishable from a website inquiry rather than claiming to be one.
+
+## Importing a spreadsheet
+
+**Import spreadsheet** on Pending Review takes an `.xlsx` lead list from a
+trade show and puts its leads on Pending Review. `spreadsheet_import.py` does
+it; the dashboard runs it on a background thread with a progress page,
+because a few hundred rows is minutes of model calls.
+
+**The model reads the sheet, because every sheet is different** (rebuilt
+2026-09-28, replacing a column-alias parser). A badge-scanner export, a rep's
+own list and an organiser's report share no layout, and a parser that maps
+headers to fields drops every column it does not recognise, cannot split
+"Irvine, CA 92618", and cannot see a title block. Accuracy is chosen over
+cost deliberately: uploads are rare, and a lead mangled on the way in is a
+customer nobody follows up. Two passes, both on the pinned model:
+
+1. **Layout** — the first 25 rows of every sheet, its last few, the sheet
+   names, the filename and the workbook title. The model says where the
+   headers and data start, which tabs hold leads, what each column really
+   holds, and which trade show the list is from.
+2. **Rows** — ten rows per call (six calls at a time), each cell labelled
+   with its header, read into the fields the email extractor fills. It
+   splits combined cells, reads any rating scale (Hot/Warm, A/B/C, 1–5) as
+   Hot or Warm, and classifies Market with the email extractor's criteria.
+
+**Every value is checked against the row it came from.** The model is told
+to copy, and `_check_row()` holds it to that: a name, company, title, email,
+address, city, ZIP or phone number that does not appear in the row itself
+(case and punctuation ignored; phone numbers by their digits) is dropped and
+listed on the lead. Market and Rank must be valid dropdown values. Country
+and State may be inferred when the row has none (Munich → Germany), but only
+to a real country or state, and an inferred one is noted. The show name must
+appear somewhere in the workbook. This is also the prompt-injection
+boundary: whatever a cell talks the model into, what reaches a lead is text
+already in that row or a validated value, and it still needs approving.
+
+**Err on the side of importing** (Keaton, 2026-09-28). A row is skipped only
+when it explicitly says Cold, and the word must actually be in the row — the
+model calling something cold is not enough ("not a fit" is still a lead).
+Rows the model calls "not a lead" are skipped only when they are trivial (no
+email, no phone-length number, at most two filled cells: a totals line, a
+section title); anything more is imported with the model's doubt in its
+notes, for a human to reject. A repeated header row, and a row identical to
+one already read (the same list pasted onto two tabs), are left out. A tab
+the model says holds no leads is still read if it contains an email address.
+
+**Nothing on the sheet is lost.** Every cell the fields did not use goes into
+Lead Details verbatim as `Header: value` — booth notes, product interest, a
+combined address — so the rep in Oracle sees everything the sheet said.
+
+**Oracle title: `COMPANY - Contact - Tradeshow - <show>`.** Leads carry a
+`trade_show` field, read from the workbook (a title row, an Event column, a
+tab name, the filename) and editable on the review form.
+`pipeline_submit._project_label()` uses it for *any* lead that has one, so
+typing a show onto an emailed lead titles it the same way. An uploaded lead
+with no show cannot be approved (`submission_blockers()`); the upload form
+has an optional show box used only when the workbook never names one, so a
+list without a title does not mean editing every lead.
+
+**Lead Source: Trade Shows, not Website** (Keaton, 2026-09-28). Oracle's
+Lead Source used to be Website for every lead. It is now decided per lead by
+`oracle_api.lead_source_for()`: a source chosen for the lead wins; otherwise
+a lead with a trade show (or a sheet attached to an email, which has always
+been titled a trade show's) is **Trade Shows**; anything else is Website. The
+upload form asks **"Where are these leads from?"** with Oracle's own Lead
+Source list, defaulting to Trade Shows, and every lead from the file carries
+the answer in `lead_source`, editable on the review form. Only a Trade Shows
+upload is given a show name and required to have one; a list from anywhere
+else (a referral list, a webinar's sign-ups) is titled after its source
+instead — `COMPANY - Contact - Referrals`.
+
+**When the model is unavailable** — no key, an outage, a failed batch, or a
+row left out of an answer — those rows fall back to `excel_parser`'s column
+mapping and say so on the lead. Without a layout, a tab is read only if it
+has an email address or a name/company header, so a summary tab's totals do
+not become leads. Only a cell reading exactly "Cold" skips a row then:
+matching the word anywhere would drop a note about cold-rolled steel.
+
+Like Create lead, and for the same reasons, there is **no fraud screen** and
+**no head-office lookup**. Also:
+
+- **The file is never written to disk.** It is read from memory; the
+  dashboard's `_Request` keeps the upload out of Werkzeug's temp-file
+  spooling. The background job lives in memory only.
+- **Re-uploading the same file is harmless.** Each row's `ingest_key` is the
+  file's hash, tab and row number. An *edited* file is a different file, and
+  its rows come in again; insert-time duplicate flagging still marks them.
+- **A workbook is one transaction**, taken with `BEGIN IMMEDIATE` and
+  re-checked for a concurrent upload of the same file. An import that dies
+  partway — or a dashboard restart mid-import — leaves nothing behind.
+- **500 rows and 10 MB at most.** Split a bigger list.
+- ZIPs formatted with leading zeros keep them; dates read as dates.
+- `.xlsx` / `.xlsm` (cell values only; macros never run) and `.csv`. A CSV is
+  read as a workbook of one sheet named after the file (`read_csv()`), in
+  whichever encoding Excel wrote it (CSV UTF-8, the Windows code page, or
+  UTF-16 "Unicode Text"), split on whichever of `,` `;` tab `|` divides its
+  rows most evenly -- European Excel writes `;` -- or on a `sep=` first line.
+  Its values are already text, so ZIPs keep their leading zeros. Legacy
+  `.xls` is refused with a sentence saying to save as `.xlsx`.
 
 ## Nothing runs on a timer
 
@@ -612,6 +716,47 @@ py oracle_field_probe.py                      # scan recent leads
 py oracle_field_probe.py --lead 300000123456  # a lead whose Website box is filled in
 py oracle_field_probe.py --describe           # Oracle's metadata, incl. updatable/createable
 ```
+
+### Linking to an account Oracle already has
+
+A lead whose company or contact is already in Oracle should attach to that
+record instead of creating a second one. `oracle_api.resolve_existing_party()`
+decides that — contact email first, then a single exactly-named account — and
+the payload points at the match with **`CustomerId`** (the account's party id)
+and **`ContactPartyNumber`** (the contact's party number), with
+`EnableCreateAccount` / `EnableCreateContact` set to `N`.
+
+**It is the identifier that links, not the name** (2026-09-18). This used to
+send the record's exact stored name — `CustomerPartyName` — on the reading that
+Oracle would resolve it, and an earlier note here said no id attribute existed
+on leads. Both were wrong. Of the twelve leads submitted that way and audited
+against Oracle, **ten came back with `EnableCreateAccount` flipped to `Y`, no
+`CustomerId`, and the company sitting on the lead as loose text**; one had lost
+the company entirely. Nothing was attached to anything, and nothing said so —
+the lead looked submitted, the warning on it said "linked to existing Oracle
+account … no new account created", and only Oracle showed otherwise. It
+surfaced through the Assign-to-existing-company button, which appeared to do
+nothing because in Oracle it did nothing.
+
+`leads/describe` on this tenant lists both attributes used now. The four names
+tried when the name form was chosen — `CustomerPartyId`, `PrimaryContactPartyId`,
+`AccountPartyId`, `PartyId` — are indeed not among them, which is how the
+conclusion "no id attribute exists" was reached from a real 400.
+
+Two consequences worth keeping:
+
+- Account party *numbers* on this tenant are strings (`SCE_150572`), party
+  *ids* are integers, and `CustomerId` is an integer attribute. `_party_id()`
+  refuses anything that is not one rather than letting a 400 reject the lead.
+- If a tenant ever refuses `CustomerId` or `ContactPartyNumber`, the submit is
+  retried once in the old name form and the lead still lands, carrying a
+  warning that says it may not be attached. Same shape as the website-field
+  retry above, and for the same reason: losing the link is bad, losing the
+  lead is worse.
+
+Leads submitted before this date are attached in Oracle only where a human
+attached them. They are not repaired automatically — nothing in the pipeline
+PATCHes a lead after submission.
 
 ## Duplicate protection
 

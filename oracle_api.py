@@ -7,8 +7,10 @@ identifiers needed for audit/retry.
 """
 
 import base64
+import difflib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,12 +42,78 @@ LEAD_SOURCE_VALUES = {
     'Website',
 }
 
+TRADE_SHOW_LEAD_SOURCE = 'Trade Shows'
+
+
+def lead_source_for(lead, default='Website'):
+    """
+    The Lead Source a lead goes to Oracle with.
+
+    A value chosen for the lead -- on the spreadsheet upload form or the
+    review form -- wins. Otherwise a lead met at a trade show is 'Trade
+    Shows' (Keaton, 2026-09-28): one carrying a show name, or a sheet of leads
+    attached to an email, which has always been titled "Tradeshow". Anything
+    else is `default`, the Website inquiry this pipeline was built for.
+    """
+    chosen = (lead.get('lead_source') or '').strip()
+    if chosen in LEAD_SOURCE_VALUES:
+        return chosen
+    if (lead.get('trade_show') or '').strip() or lead.get('source') == 'email_excel_attachment':
+        return TRADE_SHOW_LEAD_SOURCE
+    return default
+
 # How to express PrimaryContactCountry. 'code' sends the ISO alpha-2 territory
 # code (US, DE), which is what this tenant has accepted for US/CA to date;
 # 'name' sends Oracle's dropdown label ('Germany') instead. Overridable via
 # config.oracle.country_format so a tenant that rejects codes is a config
 # change rather than a code change.
 COUNTRY_FORMATS = ('code', 'name')
+
+_COMPANY_LEGAL_SUFFIXES = re.compile(
+    r'\b(INC|INCORPORATED|CORP|CORPORATION|LLC|L\.L\.C\.|LTD|LIMITED|CO|COMPANY|GMBH|PLC|S\.A\.|BV|N\.V\.|AG|SAS)\b',
+    re.IGNORECASE
+)
+
+
+def normalize_company_name(name):
+    """
+    Clean and normalize a company name for similarity matching:
+    - Normalizes case and punctuation.
+    - Strips common corporate/legal entity suffixes (Inc, Corp, LLC, etc.).
+    - Collapses extra spaces.
+    """
+    if not name:
+        return ''
+    cleaned = name.upper()
+    cleaned = re.sub(r'[^\w\s]', ' ', cleaned)
+    cleaned = _COMPANY_LEGAL_SUFFIXES.sub('', cleaned)
+    return ' '.join(cleaned.split())
+
+
+def calculate_company_similarity(name1, name2):
+    """
+    Calculate a similarity score between 0.0 and 1.0 for two company names using
+    normalized base comparison and sequence matching.
+    """
+    norm1 = normalize_company_name(name1)
+    norm2 = normalize_company_name(name2)
+    if not norm1 or not norm2:
+        return 0.0
+    if norm1 == norm2:
+        return 1.0
+
+    ratio = difflib.SequenceMatcher(None, norm1, norm2).ratio()
+
+    # If all tokens of the shorter normalized name match tokens of the longer name
+    tokens1 = set(norm1.split())
+    tokens2 = set(norm2.split())
+    if tokens1 and tokens2:
+        intersection = tokens1.intersection(tokens2)
+        smaller_len = min(len(tokens1), len(tokens2))
+        if len(intersection) == smaller_len and any(len(t) > 2 for t in intersection):
+            ratio = max(ratio, 0.85)
+
+    return ratio
 
 # Oracle's custom LOV stores a code/value in IndustryDescriptionBSE_c and
 # exposes the visible Create Lead dropdown label via
@@ -142,6 +210,15 @@ def submission_blockers(lead):
             'Territory Manager is unassigned; complete or correct the location, '
             'or choose a manager manually.'
         )
+    # An uploaded trade-show list titles each lead after the show ("... -
+    # Tradeshow - Space Tech Expo"). One whose sheet never named the show
+    # would go out without it. Lists from anywhere else need no show.
+    if (lead.get('source') == 'spreadsheet_upload'
+            and lead_source_for(lead) == TRADE_SHOW_LEAD_SOURCE
+            and not _clean(lead.get('trade_show'))):
+        blockers.append(
+            'Trade Show is missing; enter the show this lead came from.'
+        )
     return blockers
 
 
@@ -222,6 +299,49 @@ def _put(payload, key, value):
         payload[key] = value
 
 
+def _party_id(value):
+    """An Oracle party id as the integer CustomerId wants, or None.
+
+    Party ids arrive as integers from REST and as strings from anywhere they
+    have been stored; a party *number* (SCE_150572) is not one and must not be
+    sent as one -- a non-integer here would be a 400 that rejects the lead.
+    """
+    if value in (None, ''):
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+# The two attributes that link a lead to records Oracle already has, and the
+# name-carrying attribute each one falls back to. Sent as identifiers because
+# names do not link (see build_lead_payload); listed here so submit_lead can
+# undo that in the one case where a tenant rejects them.
+LINK_BY_ID_FIELDS = ('CustomerId', 'ContactPartyNumber')
+
+
+def relink_payload_by_name(payload, existing):
+    """Rewrite an identifier link back into the name form, in place.
+
+    The escape hatch for a tenant whose leads resource refuses CustomerId or
+    ContactPartyNumber: the lead still goes, carrying the names, rather than
+    being rejected whole over the linking attribute.
+    """
+    existing = existing or {}
+    for field in LINK_BY_ID_FIELDS:
+        payload.pop(field, None)
+    account = _clean(existing.get('account_name'))
+    contact = _clean(existing.get('contact_name'))
+    if account:
+        payload['CustomerPartyName'] = account
+        payload['EnableCreateAccount'] = 'N'
+    if contact:
+        payload['PrimaryContactPartyName'] = contact
+        payload['EnableCreateContact'] = 'N'
+    return payload
+
+
 def build_lead_payload(lead, trade_show_name, source_label='Tradeshow',
                        lead_source='Website', campaign_name=None,
                        market_map=None, existing=None, country_format='code',
@@ -230,17 +350,17 @@ def build_lead_payload(lead, trade_show_name, source_label='Tradeshow',
     Convert the pipeline's lead shape into Oracle's REST lead payload.
 
     `existing` is the result of OracleLeadApiClient.resolve_existing_party():
-    when it names an account or contact already in Oracle, the payload points
-    at that record with EnableCreateAccount/EnableCreateContact set to 'N'
-    instead of creating a fresh one.
+    when it finds an account or contact already in Oracle, the payload points
+    at that record by party identifier with EnableCreateAccount /
+    EnableCreateContact set to 'N', instead of creating a fresh one.
 
     `website_field` names the attribute behind the Website box on this
     tenant's lead layout (config.json oracle.website_field). It is configured
-    rather than assumed, for the same reason the party IDs above are not sent:
-    an attribute this tenant doesn't recognize comes back "not a valid field"
-    as a 400 that rejects the whole lead, so a guess here would cost far more
-    than the field is worth. Run oracle_field_probe.py once to read the real
-    name off the tenant. Unset simply means no website is sent.
+    rather than assumed because an attribute this tenant doesn't recognize
+    comes back "not a valid field" as a 400 that rejects the whole lead, so a
+    guess here would cost far more than the field is worth. Run
+    oracle_field_probe.py once to read the real name off the tenant. Unset
+    simply means no website is sent.
 
     `owner_resolver` turns a Territory Manager name into the spelling
     Oracle will actually match -- see OracleLeadApiClient.resolve_owner().
@@ -280,22 +400,50 @@ def build_lead_payload(lead, trade_show_name, source_label='Tradeshow',
     _put(payload, 'PrimaryContactCountry', country)
 
     # Point at an existing account/contact when one was matched, otherwise let
-    # Oracle create them. This tenant exposes no CustomerPartyId /
-    # PrimaryContactPartyId attribute on leads (all four ID forms return
-    # "not a valid field"), so linking is done by sending the record's exact
-    # stored name with EnableCreate* = 'N' and letting Oracle resolve it.
+    # Oracle create them.
+    #
+    # The link is made with the party identifier -- CustomerId for the account,
+    # ContactPartyNumber for the contact -- because a name does not make it.
+    # This used to send the record's exact stored name with EnableCreate* =
+    # 'N', on the reading that Oracle would resolve it. It does not: of twelve
+    # leads submitted that way, ten came back with EnableCreateAccount flipped
+    # to 'Y', CustomerId empty and the company left as loose text, so the lead
+    # reached Oracle attached to nothing (audited 2026-09-18, and the reason
+    # the Assign-to-existing-company button appeared to do nothing). The
+    # earlier note here said no ID attribute existed on leads; leads/describe
+    # on this tenant lists both of the two used below. The four names tried
+    # then -- CustomerPartyId, PrimaryContactPartyId, AccountPartyId, PartyId
+    # -- are indeed not among them.
     existing_account = _clean(existing.get('account_name'))
     existing_contact = _clean(existing.get('contact_name'))
+    account_party_id = _party_id(existing.get('account_party_id'))
+    contact_party_number = _clean(existing.get('contact_party_number'))
 
-    if existing_account:
+    if account_party_id is not None:
+        payload['CustomerId'] = account_party_id
+        payload['EnableCreateAccount'] = 'N'
+    elif existing_account:
+        # Matched, but the identifier did not come back. Better than nothing:
+        # the lead carries the right company name for a human to link.
         payload['CustomerPartyName'] = existing_account
         payload['EnableCreateAccount'] = 'N'
+        warnings.append(
+            f'No party ID for matched account {existing_account!r}; sent by name, '
+            'which Oracle may not resolve -- check the company on the lead.'
+        )
     elif organization:
         payload['CustomerPartyName'] = organization
 
-    if existing_contact:
+    if contact_party_number:
+        payload['ContactPartyNumber'] = contact_party_number
+        payload['EnableCreateContact'] = 'N'
+    elif existing_contact:
         payload['PrimaryContactPartyName'] = existing_contact
         payload['EnableCreateContact'] = 'N'
+        warnings.append(
+            f'No party number for matched contact {existing_contact!r}; sent by name, '
+            'which Oracle may not resolve -- check the contact on the lead.'
+        )
     elif full_name:
         payload['PrimaryContactPartyName'] = full_name
     _put(payload, 'PrimaryContactPersonFirstName', first)
@@ -560,8 +708,11 @@ class OracleLeadApiClient:
         linking -- a prefix search for "MOTION" returns 62 accounts and
         "RAYTHEON" 33, including near-duplicates like "RAYTHEON (1375600)", so
         picking one automatically would silently attach the lead to the wrong
-        customer. Prefix hits are returned purely so they can be shown to a
-        human.
+        customer.
+
+        Candidate hits are stringently filtered using calculate_company_similarity()
+        so generic prefix hits (e.g. "Cat" matching "Caterpillar") do not
+        raise false-positive duplicate account warnings.
         """
         organization = (organization or '').strip()
         if not organization:
@@ -571,9 +722,19 @@ class OracleLeadApiClient:
         exact = self._query(
             self.accounts_url, f"OrganizationName='{_q_escape(name)}'", fields, limit=2,
         )
-        prefix = self._query(
+        raw_prefix = self._query(
             self.accounts_url, f"OrganizationName LIKE '{_q_escape(name)}%'", fields,
         )
+        
+        # Stringent candidate filtering: keep only candidates whose similarity score is >= 0.80
+        prefix = []
+        for account in raw_prefix:
+            acct_name = account.get('OrganizationName') or ''
+            if acct_name.upper() == name:
+                continue
+            if calculate_company_similarity(organization, acct_name) >= 0.80:
+                prefix.append(account)
+
         return exact, prefix
 
     def resolve_existing_party(self, lead):
@@ -581,20 +742,31 @@ class OracleLeadApiClient:
         Decide whether this lead belongs to an account/contact Oracle already
         has. Returns a dict consumed by build_lead_payload():
 
-            {'account_name', 'contact_name', 'match_basis', 'warnings'}
+            {'account_name', 'account_party_id', 'account_party_number',
+             'contact_name', 'contact_party_number', 'match_basis', 'warnings'}
+
+        The party identifiers matter more than the names: sending a name is
+        what this used to do, and Oracle silently declined to resolve it (see
+        build_lead_payload). Every lookup here already reads the identifiers
+        back, so carrying them costs nothing.
 
         Confidence tiers, highest first:
           1. exact contact email  -> link contact AND its account
           2. exactly one account of that exact name -> link the account only
           3. anything else -> create new, and warn with the candidates
         """
-        result = {'account_name': None, 'contact_name': None,
+        result = {'account_name': None, 'account_party_id': None,
+                  'account_party_number': None, 'contact_name': None,
+                  'contact_party_number': None,
                   'match_basis': 'none', 'warnings': []}
 
         contact = self.find_contact_by_email(lead.get('email'))
         if contact:
             result['contact_name'] = contact.get('ContactName')
+            result['contact_party_number'] = contact.get('PartyNumber')
             result['account_name'] = contact.get('AccountName')
+            result['account_party_id'] = contact.get('AccountPartyId')
+            result['account_party_number'] = contact.get('AccountPartyNumber')
             result['match_basis'] = 'contact_email'
             result['warnings'].append(
                 f"Linked to existing Oracle contact {contact.get('ContactName')!r}"
@@ -609,6 +781,8 @@ class OracleLeadApiClient:
         if len(exact) == 1:
             account = exact[0]
             result['account_name'] = account.get('OrganizationName')
+            result['account_party_id'] = account.get('PartyId')
+            result['account_party_number'] = account.get('PartyNumber')
             result['match_basis'] = 'account_name_exact'
             result['warnings'].append(
                 f"Linked to existing Oracle account {account.get('OrganizationName')!r}"
@@ -617,15 +791,17 @@ class OracleLeadApiClient:
             return result
 
         if prefix:
+            candidates = [a.get('OrganizationName') for a in prefix if a.get('OrganizationName')]
             names = ', '.join(
-                repr(a.get('OrganizationName')) for a in prefix[:MAX_NAMED_CANDIDATES]
+                repr(name) for name in candidates[:MAX_NAMED_CANDIDATES]
             )
-            more = '' if len(prefix) <= MAX_NAMED_CANDIDATES else f' (+{len(prefix) - MAX_NAMED_CANDIDATES} more)'
+            more = '' if len(candidates) <= MAX_NAMED_CANDIDATES else f' (+{len(candidates) - MAX_NAMED_CANDIDATES} more)'
             result['match_basis'] = 'ambiguous'
+            result['candidates'] = candidates
             result['warnings'].append(
                 f'Company {organization!r} resembles {len(prefix)} existing Oracle '
-                f'account(s) but none matched exactly, so a new account was created. '
-                f'Candidates: {names}{more}. Merge in Oracle if this is a duplicate.'
+                f'account(s) ({names}{more}). '
+                f'Choose whether to assign to an existing company or create as a new company.'
             )
         return result
 
@@ -635,9 +811,17 @@ class OracleLeadApiClient:
         # stop this attempt and be retried safely later.
         existing = self.resolve_existing_party(lead)
 
+        if (existing or {}).get('match_basis') == 'ambiguous' and not bypass_dedup:
+            warning_msg = (
+                existing['warnings'][0]
+                if (existing and existing.get('warnings'))
+                else 'Company closely matches existing Oracle account(s).'
+            )
+            raise OracleApiError(f'Submission blocked: {warning_msg}')
+
         payload, project_name, warnings = build_lead_payload(
             lead, trade_show_name, source_label=source_label,
-            lead_source=self.lead_source,
+            lead_source=lead_source_for(lead, self.lead_source),
             campaign_name=self.campaign_name,
             existing=existing,
             country_format=self.country_format,
@@ -717,19 +901,47 @@ class OracleLeadApiClient:
                 len(description), len(compacted), method,
             )
 
-        try:
-            response = self.session.post(
-                self.leads_url,
-                auth=(self.username, self.password),
-                headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
-                data=json.dumps(payload),
-                timeout=self.timeout,
+        def post_lead(body):
+            try:
+                return self.session.post(
+                    self.leads_url,
+                    auth=(self.username, self.password),
+                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                    data=json.dumps(body),
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as e:
+                raise OracleApiError(
+                    f'Oracle API request outcome is unknown: {e}',
+                    outcome_unknown=True,
+                ) from e
+
+        response = post_lead(payload)
+
+        # Linking by party identifier is what actually attaches the lead to the
+        # account and contact Oracle already has. If this tenant's leads
+        # resource will not take one, that is a 400 rejecting the whole lead
+        # over the link -- so it is retried once in the old name form, which at
+        # least carries the right names onto a lead that exists. As with the
+        # website field below, only a 400/422 naming the attribute qualifies,
+        # which means Oracle created nothing and the retry cannot duplicate.
+        rejected_links = [
+            field for field in LINK_BY_ID_FIELDS
+            if field in payload and field.lower() in (response.text or '').lower()
+        ]
+        if rejected_links and response.status_code in (400, 422):
+            logger.warning(
+                'Oracle rejected %s ("%s"); resubmitting with the account/contact '
+                'named instead. The lead will land, but may not be attached to the '
+                'existing records -- check it in Oracle.',
+                ', '.join(rejected_links), (response.text or '')[:200],
             )
-        except requests.RequestException as e:
-            raise OracleApiError(
-                f'Oracle API request outcome is unknown: {e}',
-                outcome_unknown=True,
-            ) from e
+            warnings.append(
+                f'Oracle rejected the account/contact link ({", ".join(rejected_links)}); '
+                'lead submitted with the names only, which may leave it unattached.'
+            )
+            relink_payload_by_name(payload, existing)
+            response = post_lead(payload)
 
         # The website attribute is the one field here whose writability could
         # not be confirmed from Oracle's metadata (leads/describe doesn't list
@@ -753,19 +965,7 @@ class OracleLeadApiClient:
                 'lead submitted without it.'
             )
             payload.pop(self.website_field)
-            try:
-                response = self.session.post(
-                    self.leads_url,
-                    auth=(self.username, self.password),
-                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
-                    data=json.dumps(payload),
-                    timeout=self.timeout,
-                )
-            except requests.RequestException as e:
-                raise OracleApiError(
-                    f'Oracle API request outcome is unknown: {e}',
-                    outcome_unknown=True,
-                ) from e
+            response = post_lead(payload)
 
         if response.status_code >= 400:
             raise OracleApiError(
