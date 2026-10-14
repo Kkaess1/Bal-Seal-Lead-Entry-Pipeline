@@ -328,6 +328,37 @@ Set that to `false` to hide the button and refuse deletion outright — worth
 doing on any run that should not touch the real mailbox. An unreadable or
 invalid `config.json` is treated as `false` rather than defaulting to allowed.
 
+### Spam folder (Gmail leads)
+
+Pending Review has two folders, **Inbox** and **Spam** (added 2026-10-05).
+A lead that came in by email from a Gmail address goes to Spam. That covers
+the address the email was sent from and the contact address extracted from
+it, so a web form naming `someone@gmail.com` is filed there too
+(`spam_folder.SPAM_DOMAINS`: `gmail.com`, `googlemail.com`). A lead entered
+by hand or imported from a spreadsheet stays in Inbox whatever its address,
+because a reviewer put it there on purpose and there is no email to delete.
+
+Spam is a view, not a status. Every lead in it is still `pending_review`, so
+Approve, Reject, Edit, Reply, Forward and Delete all work there exactly as in
+Inbox, the nav count covers both folders, and `lead_stages.py` did not change.
+It also follows the lead's current details: correcting the contact address
+moves the lead to Inbox, unless the email itself was sent from Gmail.
+
+**Disqualify all** rejects every lead shown in Spam and moves each lead's
+email to Deleted Items, the same recoverable delete as the Delete button. It
+acts only on the cards on screen, and only on those still in Spam and still
+awaiting review: a lead that arrived after the page loaded has not been
+looked at. Two exceptions:
+
+- If an email also produced a lead that is still under review outside Spam
+  (an Excel attachment can mix addresses), the Spam leads are rejected but
+  the email stays in the inbox for the other lead.
+- If Outlook fails, the run stops at that email. Everything before it is done,
+  and everything after it is still in Spam to try again.
+
+It needs `outlook.allow_email_delete`. With deletion switched off, the button
+is not offered and the route refuses.
+
 ## Reference tab
 
 The dashboard's **Reference** tab is a quick-lookup page of whatever a reviewer
@@ -761,10 +792,21 @@ py oracle_field_probe.py --describe           # Oracle's metadata, incl. updatab
 
 A lead whose company or contact is already in Oracle should attach to that
 record instead of creating a second one. `oracle_api.resolve_existing_party()`
-decides that — contact email first, then a single exactly-named account — and
+decides that — an explicit reviewer selection first, then contact email, then a
+single exactly-named account — and
 the payload points at the match with **`CustomerId`** (the account's party id)
 and **`ContactPartyNumber`** (the contact's party number), with
 `EnableCreateAccount` / `EnableCreateContact` set to `N`.
+
+The lead editor also downloads the complete OSC account list and puts a
+fuzzy-ranked company dropdown below the extracted company name. Legal suffixes,
+case and punctuation are normalized for ranking; all accounts remain available,
+with the closest names first. A unique normalized-exact match is preselected.
+Choosing an account stores its `PartyId`, party number and canonical OSC name on
+the lead. That explicit reviewer choice outranks name inference at submission,
+while an exact-email contact is still linked when it belongs to the selected
+account. The account list is cached for 15 minutes so reviewing a batch does not
+re-download roughly ten thousand records for every lead.
 
 **It is the identifier that links, not the name** (2026-09-18). This used to
 send the record's exact stored name — `CustomerPartyName` — on the reading that

@@ -90,6 +90,12 @@ Outlook (COM) --> pipeline_ingest.py --> SQLite --> dashboard/app.py --> pipelin
   `COMPANY - Contact - Tradeshow - <show>`. The upload asks where the leads are
   from (Oracle Lead Source, default Trade Shows). Runs as a background job.
   README "Importing a spreadsheet".
+- **`spam_folder.py`** — Pending Review's Inbox / Spam split (`/?folder=spam`).
+  Email-sourced leads with a Gmail sender or contact address go to Spam. It is a
+  view over `lead_stages.PENDING`, not a status, so every review action still
+  works there. **Disqualify all** (`/spam/disqualify_all`) rejects the leads
+  shown and deletes their emails, but keeps any email that another reviewable
+  lead came from. README "Spam folder (Gmail leads)".
 - **Lead Source is per lead**, via `oracle_api.lead_source_for()`: a chosen
   `lead_source` wins, a lead with a trade show is Trade Shows, else Website.
 

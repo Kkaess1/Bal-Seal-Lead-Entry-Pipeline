@@ -106,6 +106,9 @@ def init_db(db_path=None):
 
                 {', '.join(f'{f} TEXT' for f in LEAD_SCHEMA_FIELDS)},
                 assigned_tm_basis      TEXT,
+                oracle_account_name    TEXT,
+                oracle_account_party_id TEXT,
+                oracle_account_party_number TEXT,
 
                 extraction_confidence  REAL,
                 extraction_notes       TEXT,
@@ -308,6 +311,11 @@ def _migrate_leads_columns(conn):
         'assigned_tm_basis', 'parent_lead_id', 'ingest_key',
         'submitting_started_at', 'next_attempt_at', 'oracle_record_id',
         'oracle_payload', 'field_warnings', 'alert_dismissed_at',
+        # An account explicitly chosen in the review form.  The party ID is
+        # what actually attaches a lead to an OSC account; a matching name by
+        # itself is only loose text on the lead resource.
+        'oracle_account_name', 'oracle_account_party_id',
+        'oracle_account_party_number',
     ]
     for field in text_fields:
         if field not in existing:
@@ -1387,6 +1395,29 @@ def list_leads_by_message(message_id, conn=None):
     try:
         rows = conn.execute('SELECT * FROM leads WHERE message_id = ?', (message_id,)).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def message_sender_emails(message_ids, conn=None):
+    """{message id: sender_email} for the given messages, in one query.
+
+    Pending Review files leads into Inbox and Spam partly by who sent the
+    email (see spam_folder.py), and asking for each lead's message in turn
+    would open a connection per card on every page load.
+    """
+    ids = sorted({int(m) for m in message_ids if m})
+    if not ids:
+        return {}
+    owns_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        placeholders = ', '.join('?' for _ in ids)
+        rows = conn.execute(
+            f'SELECT id, sender_email FROM messages WHERE id IN ({placeholders})', ids,
+        ).fetchall()
+        return {r['id']: r['sender_email'] for r in rows}
     finally:
         if owns_conn:
             conn.close()

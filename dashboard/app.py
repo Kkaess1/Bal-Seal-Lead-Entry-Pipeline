@@ -12,11 +12,13 @@ import os
 import re
 import secrets
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import (
-    Flask, Request, abort, flash, redirect, render_template, request, send_file,
+    Flask, Request, abort, flash, jsonify, redirect, render_template, request, send_file,
     send_from_directory, session, url_for,
 )
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -37,11 +39,15 @@ import outlook_ingest  # noqa: E402
 import retention  # noqa: E402
 import review_marking  # noqa: E402
 import secrets_store  # noqa: E402
+import spam_folder  # noqa: E402
 import spreadsheet_import  # noqa: E402
 import territory_map  # noqa: E402
 # The same rules the submitter enforces, so the dashboard cannot approve a
 # lead that Oracle would then refuse. One definition, checked in both places.
-from oracle_api import LEAD_SOURCE_VALUES, submission_blockers  # noqa: E402
+from oracle_api import (  # noqa: E402
+    LEAD_SOURCE_VALUES, OracleApiError, OracleLeadApiClient,
+    rank_company_accounts, submission_blockers,
+)
 
 class _Request(Request):
     """
@@ -125,6 +131,41 @@ LEAD_FIELD_GROUPS = [
     ]),
     ('Routing', ['assigned_tm']),
 ]
+
+# Account names change much less often than leads are reviewed.  Keep one
+# short-lived in-process copy so opening several lead editors does not download
+# the full OSC account book each time.  The dashboard is restarted daily/on
+# deployment, and a 15-minute lifetime keeps newly-created accounts discoverable.
+_ORACLE_ACCOUNT_CACHE_SECONDS = 15 * 60
+_oracle_account_cache = {'loaded_at': 0.0, 'accounts': None}
+_oracle_account_cache_lock = threading.Lock()
+
+
+def _oracle_client():
+    config_path = Path(__file__).resolve().parent.parent / 'config.json'
+    with config_path.open(encoding='utf-8') as config_file:
+        oracle_config = dict(json.load(config_file)['oracle'])
+    username = secrets_store.get_secret('ORACLE_USERNAME')
+    password = secrets_store.get_secret('ORACLE_PASSWORD')
+    if not username or not password:
+        raise OracleApiError('OSC credentials are not configured')
+    return OracleLeadApiClient(oracle_config, username=username, password=password)
+
+
+def _all_oracle_accounts():
+    now = time.monotonic()
+    cached = _oracle_account_cache['accounts']
+    if (cached is not None and
+            now - _oracle_account_cache['loaded_at'] < _ORACLE_ACCOUNT_CACHE_SECONDS):
+        return cached
+    with _oracle_account_cache_lock:
+        now = time.monotonic()
+        cached = _oracle_account_cache['accounts']
+        if (cached is None or
+                now - _oracle_account_cache['loaded_at'] >= _ORACLE_ACCOUNT_CACHE_SECONDS):
+            cached = _oracle_client().list_accounts()
+            _oracle_account_cache.update(loaded_at=now, accounts=cached)
+        return cached
 
 
 def _parse_reasons(lead):
@@ -965,6 +1006,11 @@ def assign_company(lead_id):
 
     db.update_lead_fields(lead_id, {
         'organization': company_name,
+        # This legacy warning action selects by name only.  Never let a party
+        # ID chosen earlier for some other name ride along underneath it.
+        'oracle_account_name': None,
+        'oracle_account_party_id': None,
+        'oracle_account_party_number': None,
         'submit_error': None,
         'force_submit': 0,
     })
@@ -1016,6 +1062,23 @@ def assign_company(lead_id):
     return redirect(request.referrer or url_for('index'))
 
 
+def _pending_folders():
+    """Every lead awaiting review, split into Pending Review's (inbox, spam).
+
+    lead_stages.PENDING, not 'pending_review' alone: a lead whose ingest run
+    died between being written down and being screened is left in 'ingested'
+    or 'extracted', and used to appear on no page at all. It needs a review
+    like any other, so it belongs here -- in whichever folder it falls in.
+    """
+    leads = db.list_leads(status=lead_stages.PENDING)
+    senders = db.message_sender_emails(l.get('message_id') for l in leads)
+    inbox, spam = [], []
+    for lead in leads:
+        sender = senders.get(lead.get('message_id'))
+        (spam if spam_folder.is_spam(lead, sender) else inbox).append(lead)
+    return inbox, spam
+
+
 @app.route('/')
 def index():
     """
@@ -1025,18 +1088,158 @@ def index():
     this used to do -- reviewing follows the mailbox, and a lead's position
     matching the email above it is worth more than risky ones floating up.
     The risk flags are still on every card.
+
+    ?folder=spam shows the Spam folder instead: leads from Gmail addresses,
+    reviewed the same way but disposable in one go. See spam_folder.py.
     """
-    # lead_stages.PENDING, not 'pending_review' alone: a lead whose ingest run
-    # died between being written down and being screened is left in 'ingested'
-    # or 'extracted', and used to appear on no page at all. It needs a review
-    # like any other, so it belongs here.
-    leads = db.list_leads(status=lead_stages.PENDING)
+    folder = request.args.get('folder')
+    if folder not in spam_folder.FOLDERS:
+        folder = spam_folder.INBOX
+    inbox, spam = _pending_folders()
+    leads = spam if folder == spam_folder.SPAM else inbox
     leads = [_decorate(l) for l in leads]
     leads.sort(key=_newest_first, reverse=True)
     ingest_lease = db.get_run_lease(_INGEST_JOB_KEY) or {}
     if ingest_lease.get('status') not in ('starting', 'running'):
         ingest_lease = None
-    return render_template('index.html', leads=leads, ingest_lease=ingest_lease)
+    return render_template(
+        'index.html', leads=leads, ingest_lease=ingest_lease, folder=folder,
+        inbox_count=len(inbox), spam_count=len(spam),
+        pending_total=len(inbox) + len(spam),
+    )
+
+
+@app.route('/spam/disqualify_all', methods=['POST'])
+def disqualify_spam():
+    """Reject every lead in the Spam folder and delete their emails.
+
+    Acts only on the leads the reviewer was looking at (the form posts their
+    ids) and only on those still in Spam and still awaiting review now: a lead
+    that arrived after the page loaded has not been seen, and one approved in
+    another tab has been decided.
+
+    Each email goes to the Sales mailbox's Deleted Items, the same recoverable
+    delete as a card's Delete button (outlook_ingest.delete_message). One
+    email can produce several leads; when any of its other leads is still
+    being reviewed outside Spam, the Spam leads are rejected but the email is
+    left in the inbox, so that other lead can still be checked against it.
+
+    An Outlook failure stops the run where it is rather than trying every
+    remaining email against an Outlook that is not answering. Everything
+    before that point is done; everything after is still in Spam.
+    """
+    folder_url = url_for('index', folder=spam_folder.SPAM)
+    if not outlook_ingest.deletion_enabled():
+        return _action_failed(
+            'Deleting email is switched off in config.json '
+            '(outlook.allow_email_delete), so nothing was disqualified.',
+            'spam_error', folder_url,
+        )
+
+    shown = set()
+    for raw in request.form.getlist('lead_id'):
+        try:
+            shown.add(int(raw))
+        except ValueError:
+            continue
+    _, spam = _pending_folders()
+    chosen = [l for l in spam if l['id'] in shown]
+    if not chosen:
+        return _action_failed('There are no leads in Spam to disqualify.', 'spam_error', folder_url)
+    chosen_ids = {l['id'] for l in chosen}
+
+    by_message = {}
+    for lead in chosen:
+        by_message.setdefault(lead['message_id'], []).append(lead['id'])
+
+    deleted_note = 'Disqualified from the Spam folder (Gmail); email deleted from the Sales inbox.'
+    kept_note = ('Disqualified from the Spam folder (Gmail); email kept because '
+                 'another lead from it is still being reviewed.')
+
+    def _reject(lead_ids, note):
+        # Re-read just before writing: Approve in another tab between the
+        # folder being listed and this point must win.
+        done = []
+        for lead_id in lead_ids:
+            current = db.get_lead(lead_id)
+            if current and current['status'] in lead_stages.PENDING:
+                db.reject_lead(lead_id, reviewed_by='dashboard', review_notes=note)
+                done.append(lead_id)
+        return done
+
+    dropped, emails_deleted, emails_kept, not_in_mailbox = [], 0, 0, 0
+    stopped = None
+    for message_id, lead_ids in by_message.items():
+        others = [
+            s for s in db.list_leads_by_message(message_id)
+            if s['status'] in lead_stages.EDITABLE and s['id'] not in chosen_ids
+        ]
+        message = db.get_message(message_id)
+        if others:
+            done = _reject(lead_ids, kept_note)
+            dropped += done
+            emails_kept += 1
+            if done:
+                review_marking.maybe_mark_email_reviewed(done[0])
+            continue
+        if not message or not message.get('source_message_id'):
+            # Nothing in Outlook to delete; the leads go all the same.
+            dropped += _reject(lead_ids, deleted_note)
+            continue
+
+        action_id = db.begin_outlook_action(
+            lead_ids[0], 'delete', message_id=message_id,
+            details={'source_message_id': message['source_message_id'],
+                     'via': 'spam_disqualify_all'},
+        )
+        try:
+            deleted = outlook_ingest.delete_message(message['source_message_id'])
+        except ValueError as exc:
+            # This one message is not in the Sales mailbox. Leave its leads in
+            # Spam and carry on with the rest.
+            db.finish_outlook_action(action_id, 'failed', str(exc))
+            not_in_mailbox += len(lead_ids)
+            continue
+        except outlook_ingest.OutlookDeleteError as exc:
+            db.finish_outlook_action(action_id, 'failed', str(exc))
+            app.logger.exception('Disqualify all: could not delete message %s', message_id)
+            stopped = f'Outlook failed while {exc.stage}, so it stopped there.'
+            break
+        except Exception:
+            db.finish_outlook_action(
+                action_id, 'unknown',
+                'Unexpected Outlook error; verify the message before trying again.',
+            )
+            app.logger.exception('Disqualify all: could not delete message %s', message_id)
+            stopped = ('Outlook could not delete an email, so it stopped there. Check '
+                       'that Outlook is open and signed in, then try again.')
+            break
+        db.finish_outlook_action(action_id, 'deleted')
+        dropped += _reject(lead_ids, deleted_note)
+        if deleted:
+            emails_deleted += 1
+
+    if not dropped:
+        return _action_failed(
+            stopped or 'None of the leads in Spam could be disqualified.',
+            'spam_error', folder_url,
+        )
+
+    def _n(count, word):
+        return f'{count} {word}{"" if count == 1 else "s"}'
+
+    text = (f'Disqualified {_n(len(dropped), "lead")} and deleted '
+            f'{_n(emails_deleted, "email")} from the Sales inbox.')
+    if emails_kept:
+        text += (f' {_n(emails_kept, "email")} left in the inbox because another '
+                 'lead from the same email is still being reviewed.')
+    if not_in_mailbox:
+        text += (f' {_n(not_in_mailbox, "lead")} left in Spam: '
+                 'the email is not in the Sales mailbox.')
+    if stopped:
+        remaining = len(chosen_ids) - len(dropped) - not_in_mailbox
+        text += f' {stopped} {_n(remaining, "lead")} still in Spam.'
+    return _action_done(text, 'spam_success', folder_url, dropped=dropped)
 
 
 @app.route('/ingest', methods=['POST'])
@@ -1494,6 +1697,38 @@ def lead_detail(lead_id):
                             lead_source_options=sorted(LEAD_SOURCE_VALUES))
 
 
+@app.route('/leads/<int:lead_id>/oracle-companies')
+def oracle_companies(lead_id):
+    """All OSC accounts, fuzzy-ranked for the company currently being edited."""
+    lead = db.get_lead(lead_id)
+    if not lead:
+        abort(404)
+    if lead['status'] not in lead_stages.EDITABLE:
+        abort(409, 'This lead is no longer editable')
+    organization = (request.args.get('q') or lead.get('organization') or '').strip()
+    try:
+        ranked = rank_company_accounts(organization, _all_oracle_accounts())
+    except (OracleApiError, OSError, ValueError, KeyError):
+        app.logger.exception('Could not load OSC companies for lead %s', lead_id)
+        return jsonify({
+            'ok': False,
+            'error': 'Could not load companies from OSC. Try again in a moment.',
+        }), 503
+    return jsonify({
+        'ok': True,
+        'query': organization,
+        'accounts': [
+            {
+                'party_id': str(account['PartyId']),
+                'party_number': str(account.get('PartyNumber') or ''),
+                'name': account['OrganizationName'],
+                'similarity': round(account['similarity'], 4),
+            }
+            for account in ranked
+        ],
+    })
+
+
 @app.route('/leads/<int:lead_id>/save', methods=['POST'])
 def save_lead(lead_id):
     lead = db.get_lead(lead_id)
@@ -1512,6 +1747,29 @@ def save_lead(lead_id):
     for field in db.LEAD_SCHEMA_FIELDS:
         if field in request.form:
             edited[field] = request.form.get(field) or None
+
+    # The select's option carries the OSC party identity as well as its name.
+    # Persist all three together; changing back to free text deliberately
+    # clears the old match so it cannot attach a newly typed company to a stale
+    # account ID.
+    selected_account_id = request.form.get('oracle_account_party_id', '').strip()
+    selected_account_name = request.form.get('oracle_account_name', '').strip()
+    selected_account_number = request.form.get('oracle_account_party_number', '').strip()
+    if selected_account_id:
+        if not selected_account_id.isdigit() or not selected_account_name:
+            abort(400, 'Invalid OSC company selection')
+        edited.update({
+            'organization': selected_account_name,
+            'oracle_account_name': selected_account_name,
+            'oracle_account_party_id': selected_account_id,
+            'oracle_account_party_number': selected_account_number or None,
+        })
+    else:
+        edited.update({
+            'oracle_account_name': None,
+            'oracle_account_party_id': None,
+            'oracle_account_party_number': None,
+        })
     _refresh_territory_assignment(lead, edited)
     if 'review_notes' in request.form:
         edited['review_notes'] = request.form.get('review_notes') or None
@@ -1618,7 +1876,17 @@ def approve(lead_id):
         abort(409, 'Lead is no longer awaiting review')
     # The reason it could not be approved before no longer applies.
     db.update_lead_fields(lead_id, {'submit_error': None})
-    return redirect(url_for('index'))
+    return redirect(_pending_folder_url(lead))
+
+
+def _pending_folder_url(lead):
+    """Pending Review, opened on the folder `lead` was filed in, so deciding a
+    Spam lead from its own page goes back to Spam rather than to Inbox."""
+    message_id = lead.get('message_id')
+    sender = db.message_sender_emails([message_id]).get(message_id)
+    if spam_folder.folder_of(lead, sender) == spam_folder.SPAM:
+        return url_for('index', folder=spam_folder.SPAM)
+    return url_for('index')
 
 
 @app.route('/leads/<int:lead_id>/reject', methods=['POST'])
@@ -1632,7 +1900,7 @@ def reject(lead_id):
         review_notes=request.form.get('review_notes') or None,
     )
     review_marking.maybe_mark_email_reviewed(lead_id)
-    return redirect(url_for('index'))
+    return redirect(_pending_folder_url(lead))
 
 
 @app.route('/leads/<int:lead_id>/forward', methods=['POST'])

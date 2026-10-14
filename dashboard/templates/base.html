@@ -702,6 +702,12 @@
       font-weight: 400; font-size: var(--fs-cap); color: var(--text-muted);
       overflow-wrap: anywhere;
     }
+    .oracle-company-select {
+      border-color: var(--accent);
+      background-color: var(--tint-accent);
+    }
+    .oracle-company-status[data-state="matched"] { color: var(--clear-fg); }
+    .oracle-company-status[data-state="error"] { color: var(--reject-fg); }
 
     /* =========================================================================
        EMPTY STATES
@@ -721,6 +727,42 @@
     .empty-container h3 {
       margin: 0; font-size: var(--fs-h3); font-weight: 600; color: var(--text);
     }
+
+    /* =========================================================================
+       PENDING REVIEW: Inbox / Spam folders
+       ========================================================================= */
+    /* Underlined tabs on a hairline, the same idiom as the header nav, so the
+       folders read as places within the page rather than as buttons. */
+    .review-folders {
+      display: flex; gap: var(--s-1); margin: 0 0 var(--s-5);
+      border-bottom: 1px solid var(--border-hairline);
+    }
+    .review-folders a {
+      position: relative; display: inline-flex; align-items: center; gap: var(--s-2);
+      padding: var(--s-2) var(--s-3); color: var(--text-muted); text-decoration: none;
+      font-size: var(--fs-sm); font-weight: 500;
+    }
+    .review-folders a::after {
+      content: ''; position: absolute; left: var(--s-3); right: var(--s-3); bottom: -1px;
+      height: 2px; background: var(--orange); border-radius: 1px;
+      transform: scaleX(0); transition: transform var(--t-state) var(--ease-out-quart);
+    }
+    .review-folders a.active { color: var(--text); }
+    .review-folders a.active::after { transform: scaleX(1); }
+    .review-folders a:hover { color: var(--text); }
+    .review-folders .nav-count {
+      font-size: var(--fs-cap); font-weight: 600; color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .spam-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: var(--s-4); flex-wrap: wrap;
+      margin: 0 0 var(--s-5); padding: var(--s-3) var(--s-4);
+      background: var(--review-bg); border: 1px solid var(--review-border);
+      border-radius: var(--r-md); color: var(--text); font-size: var(--fs-sm);
+    }
+    .spam-bar p { margin: 0; flex: 1 1 320px; }
+    .spam-bar[hidden] { display: none; }
 
     /* =========================================================================
        LEAD DETAIL: email actions
@@ -1418,9 +1460,9 @@
       <img src="{{ url_for('static', filename='logo.svg') }}" alt="Bal Seal Engineering">
     </a>
     <nav>
-      {# pending-link so removeLeadCards() can keep this count honest when cards
-         are cleared without a page load. #}
-      <a href="{{ url_for('index') }}" class="pending-link {{ 'active' if request.endpoint == 'index' }}">Pending Review{% if pending_count %} ({{ pending_count }}){% endif %}</a>
+      {# data-live-count so removeLeadCards() can keep this count honest when
+         cards are cleared without a page load. Covers Inbox and Spam both. #}
+      <a href="{{ url_for('index') }}" class="pending-link {{ 'active' if request.endpoint == 'index' }}">Pending Review<span data-hide-at-zero{% if not pending_count %} hidden{% endif %}> (<span data-live-count>{{ pending_count }}</span>)</span></a>
       <a href="{{ url_for('queue') }}" class="{{ 'active' if request.endpoint == 'queue' }}">Input Queue{% if staged_count or ready_count %} <span class="nav-count">{{ staged_count + ready_count }}</span>{% endif %}</a>
       <a href="{{ url_for('history') }}" class="{{ 'active' if request.endpoint == 'history' }}">History</a>
       <a href="{{ url_for('reference') }}" class="{{ 'active' if request.endpoint in ('reference', 'reference_file') }}">Reference</a>
@@ -1556,7 +1598,7 @@
       if (errorBox) errorBox.hidden = true;
       if (submitButton) submitButton.disabled = true;
 
-      fetch(form.action, {
+      return fetch(form.action, {
         method: 'POST',
         body: new FormData(form),
         headers: {
@@ -1657,14 +1699,17 @@
 
         var remaining = document.querySelectorAll('.card').length;
         var heading = document.querySelector('h2');
-        if (heading && heading.textContent.indexOf('Pending Review') !== -1) {
-          heading.textContent = 'Pending Review (' + remaining + ')';
-        }
-        var navLink = document.querySelector('nav a.pending-link');
-        if (navLink) {
-          navLink.textContent = remaining
-            ? 'Pending Review (' + remaining + ')'
-            : 'Pending Review';
+        // Pending Review's totals span both of its folders (Inbox and Spam),
+        // so they are counted down by what was just decided rather than reset
+        // to however many cards this folder still shows. Only on that page:
+        // a card cleared anywhere else is not a pending lead.
+        if (document.getElementById('pending-review-heading')) {
+          document.querySelectorAll('[data-live-count]').forEach(function(el) {
+            var n = Math.max(0, (parseInt(el.textContent, 10) || 0) - cards.length);
+            el.textContent = n;
+            var wrap = el.closest('[data-hide-at-zero]');
+            if (wrap) wrap.hidden = n === 0;
+          });
         }
 
         if (heading && heading.textContent.indexOf('Input Queue') !== -1) {
@@ -1672,15 +1717,23 @@
         }
 
         if (remaining === 0) {
+          document.querySelectorAll('[data-hide-when-empty]').forEach(function(el) {
+            el.hidden = true;
+          });
           var main = document.querySelector('main');
-          if (main && !document.querySelector('.empty-container')) {
-            var emptyDiv = document.createElement('div');
-            emptyDiv.className = 'empty-container';
-            // Markup matches index.html's server-rendered empty state exactly, so
-            // a queue that drains in place looks identical to one loaded empty.
-            emptyDiv.innerHTML = '<h3>No leads waiting for review</h3>' +
-              '<a href="/queue" class="btn btn-approve">Review All Leads &rarr;</a>';
-            main.appendChild(emptyDiv);
+          // index.html's own empty state, so a folder that drains in place
+          // looks identical to one loaded empty.
+          var emptyTemplate = document.getElementById('pending-empty-state');
+          if (main && !main.querySelector('.empty-container')) {
+            if (emptyTemplate) {
+              main.appendChild(emptyTemplate.content.cloneNode(true));
+            } else {
+              var emptyDiv = document.createElement('div');
+              emptyDiv.className = 'empty-container';
+              emptyDiv.innerHTML = '<h3>No leads waiting for review</h3>' +
+                '<a href="/queue" class="btn btn-approve">Review All Leads &rarr;</a>';
+              main.appendChild(emptyDiv);
+            }
           }
         }
       }, 200);
@@ -1736,6 +1789,114 @@
             button.textContent = 'Looking up…';
           }
         });
+      });
+
+      // The lead editor keeps the free-text company field because a genuinely
+      // new account still has to be possible, but places the entire OSC
+      // account book immediately below it.  The server fuzzy-ranks the list;
+      // selecting an option also carries the party ID that makes the Oracle
+      // relationship real (a copied account name alone does not).
+      document.querySelectorAll('.oracle-company-select').forEach(function(select) {
+        var field = select.closest('.edit-field');
+        var companyInput = field && field.querySelector('.company-name-input');
+        var nameInput = field && field.querySelector('input[name="oracle_account_name"]');
+        var numberInput = field && field.querySelector('input[name="oracle_account_party_number"]');
+        var status = field && field.querySelector('.oracle-company-status');
+        var persistedId = select.value;
+
+        function applySelection() {
+          var option = select.options[select.selectedIndex];
+          var name = option && option.dataset.name || '';
+          var number = option && option.dataset.number || '';
+          nameInput.value = name;
+          numberInput.value = number;
+          if (name) {
+            companyInput.value = name;
+            status.textContent = 'Matched to existing OSC company' +
+              (number ? ' #' + number : '') + '. This lead will use its Oracle party ID.';
+            status.dataset.state = 'matched';
+          } else {
+            status.textContent = 'No existing OSC company selected. Saving will treat the typed name as a new company.';
+            status.dataset.state = '';
+          }
+        }
+
+        function loadAccounts(query) {
+          select.disabled = true;
+          status.textContent = 'Loading and ranking all OSC companies...';
+          status.dataset.state = '';
+          fetch(select.dataset.url + '?q=' + encodeURIComponent(query || ''))
+            .then(function(response) {
+              if (!response.ok) throw new Error('OSC lookup failed');
+              return response.json();
+            })
+            .then(function(data) {
+              if (!data.ok) throw new Error(data.error || 'OSC lookup failed');
+              var selectedId = persistedId || select.value;
+              select.textContent = '';
+              var unmatched = document.createElement('option');
+              unmatched.value = '';
+              unmatched.textContent = 'No match - use the typed company as new';
+              select.appendChild(unmatched);
+
+              data.accounts.forEach(function(account) {
+                var option = document.createElement('option');
+                option.value = account.party_id;
+                option.dataset.name = account.name;
+                option.dataset.number = account.party_number;
+                var score = Math.round(account.similarity * 100);
+                option.textContent = account.name +
+                  (account.party_number ? ' (#' + account.party_number + ')' : '') +
+                  ' - ' + score + '% match';
+                if (account.party_id === selectedId) option.selected = true;
+                select.appendChild(option);
+              });
+
+              // A unique normalized-exact result is safe to preselect and
+              // prevents an obvious existing account from being missed.  Two
+              // exact-looking records still require the reviewer to choose.
+              if (!selectedId) {
+                var exact = data.accounts.filter(function(account) {
+                  return account.similarity >= 0.9999;
+                });
+                if (exact.length === 1) {
+                  select.value = exact[0].party_id;
+                }
+              }
+              select.disabled = false;
+              persistedId = '';
+              applySelection();
+              if (!select.value) {
+                status.textContent = data.accounts.length +
+                  ' OSC companies loaded, most similar first. Select the existing company if it is listed.';
+              }
+            })
+            .catch(function() {
+              select.textContent = '';
+              var failed = document.createElement('option');
+              failed.value = '';
+              failed.textContent = 'OSC companies unavailable - reload to retry';
+              select.appendChild(failed);
+              select.disabled = true;
+              nameInput.value = '';
+              numberInput.value = '';
+              status.textContent = 'Could not load companies from OSC. Do not approve this lead until the list is available.';
+              status.dataset.state = 'error';
+            });
+        }
+
+        select.addEventListener('change', applySelection);
+        companyInput.addEventListener('input', function() {
+          select.value = '';
+          nameInput.value = '';
+          numberInput.value = '';
+          status.textContent = 'Company text changed; matches will be re-ranked when you leave this field.';
+          status.dataset.state = '';
+        });
+        companyInput.addEventListener('blur', function() {
+          loadAccounts(companyInput.value);
+        });
+        loadAccounts(companyInput.value);
       });
 
       if (sessionStorage.getItem('scroll_to_next_lead')) {

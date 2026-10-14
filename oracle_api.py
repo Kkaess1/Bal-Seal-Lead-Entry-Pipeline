@@ -115,6 +115,34 @@ def calculate_company_similarity(name1, name2):
 
     return ratio
 
+
+def rank_company_accounts(organization, accounts):
+    """Return every OSC account, most similar to *organization* first.
+
+    Party ID is the stable identity.  Deduplicating on it prevents a page
+    boundary overlap from showing the same account twice, while retaining
+    same-named accounts that are genuinely different Oracle records.
+    """
+    unique = {}
+    for account in accounts or []:
+        party_id = account.get('PartyId')
+        name = (account.get('OrganizationName') or '').strip()
+        if party_id in (None, '') or not name:
+            continue
+        key = str(party_id)
+        if key not in unique:
+            item = dict(account)
+            item['similarity'] = calculate_company_similarity(organization, name)
+            unique[key] = item
+    return sorted(
+        unique.values(),
+        key=lambda item: (
+            -item['similarity'],
+            (item.get('OrganizationName') or '').casefold(),
+            str(item.get('PartyId')),
+        ),
+    )
+
 # Oracle's custom LOV stores a code/value in IndustryDescriptionBSE_c and
 # exposes the visible Create Lead dropdown label via
 # IndustryDescriptionBSE_cMeaning. Confirmed live through read-only API samples
@@ -616,6 +644,56 @@ class OracleLeadApiClient:
         except (requests.RequestException, ValueError) as e:
             raise OracleApiError(f'Oracle lookup request failed: {e}') from e
 
+    def list_accounts(self, page_size=500):
+        """Read every OSC account, following Oracle REST pagination.
+
+        This is used by the review-form company picker.  It deliberately does
+        not apply a server-side name filter: the operator must be able to find
+        an existing account even when the extracted company spelling is poor.
+        """
+        accounts = []
+        offset = 0
+        fields = 'PartyId,PartyNumber,OrganizationName'
+        while True:
+            try:
+                response = self.session.get(
+                    self.accounts_url,
+                    params={
+                        'fields': fields,
+                        'onlyData': 'true',
+                        'limit': str(page_size),
+                        'offset': str(offset),
+                    },
+                    auth=(self.username, self.password),
+                    headers={'Accept': 'application/json'},
+                    timeout=self.timeout,
+                )
+                if response.status_code != 200:
+                    raise OracleApiError(
+                        f'Oracle account list failed ({response.status_code}): '
+                        f'{response.text}',
+                        status_code=response.status_code,
+                        response_text=response.text,
+                    )
+                payload = response.json()
+            except OracleApiError:
+                raise
+            except requests.RequestException as exc:
+                raise OracleApiError(
+                    f'Oracle account list request failed: {exc}'
+                ) from exc
+            except (ValueError, AttributeError) as exc:
+                raise OracleApiError('Oracle account list returned invalid JSON') from exc
+
+            items = payload.get('items') or []
+            accounts.extend(items)
+            if not payload.get('hasMore') or not items:
+                break
+            # Use the actual count because the final page size and tenant-side
+            # caps need not equal the requested limit.
+            offset += len(items)
+        return accounts
+
     @property
     def resources_url(self):
         return f'{self.base_url}/crmRestApi/resources/{API_VERSION}/resources'
@@ -759,6 +837,35 @@ class OracleLeadApiClient:
                   'account_party_number': None, 'contact_name': None,
                   'contact_party_number': None,
                   'match_basis': 'none', 'warnings': []}
+
+        # A human selection from the OSC account picker outranks inference.
+        # Still retain an exact-email contact when it belongs to that selected
+        # account; otherwise honor the reviewed account and avoid attaching a
+        # contact from a different employer.
+        selected_id = _party_id(lead.get('oracle_account_party_id'))
+        selected_name = _clean(lead.get('oracle_account_name'))
+        if selected_id is not None and selected_name:
+            result['account_name'] = selected_name
+            result['account_party_id'] = selected_id
+            result['account_party_number'] = _clean(
+                lead.get('oracle_account_party_number')
+            )
+            result['match_basis'] = 'account_selected'
+            contact = self.find_contact_by_email(lead.get('email'))
+            if contact and _party_id(contact.get('AccountPartyId')) == selected_id:
+                result['contact_name'] = contact.get('ContactName')
+                result['contact_party_number'] = contact.get('PartyNumber')
+                result['match_basis'] = 'account_selected_contact_email'
+            elif contact:
+                result['warnings'].append(
+                    f"Existing Oracle contact {contact.get('ContactName')!r} was not "
+                    'linked because it belongs to a different account.'
+                )
+            result['warnings'].append(
+                f"Linked to reviewer-selected Oracle account {selected_name!r}"
+                f" (party ID {selected_id}); no new account created."
+            )
+            return result
 
         contact = self.find_contact_by_email(lead.get('email'))
         if contact:

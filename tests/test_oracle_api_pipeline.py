@@ -276,6 +276,87 @@ class OracleLeadApiClientTests(unittest.TestCase):
             'market': 'INDUSTRIAL',
         }
 
+    def test_reviewer_selected_account_outranks_contact_and_name_inference(self):
+        client = _mock_client()
+        lead = dict(
+            self._lead(),
+            oracle_account_name='ANALYTICAL ENGINES HOLDINGS',
+            oracle_account_party_id='100000055846517',
+            oracle_account_party_number='11620',
+        )
+
+        existing = client.resolve_existing_party(lead)
+
+        self.assertEqual(existing['match_basis'], 'account_selected')
+        self.assertEqual(existing['account_party_id'], 100000055846517)
+        self.assertEqual(existing['account_name'], 'ANALYTICAL ENGINES HOLDINGS')
+
+    def test_matching_contact_is_retained_with_a_reviewer_selected_account(self):
+        client = _mock_client()
+        contact_response = MagicMock(status_code=200, text='')
+        contact_response.json.return_value = {'items': [{
+            'PartyNumber': '15001', 'ContactName': 'ADA LOVELACE',
+            'AccountPartyId': 100000055846517,
+        }]}
+        client.session.get.return_value = contact_response
+
+        existing = client.resolve_existing_party({
+            'email': 'ada@example.com',
+            'oracle_account_name': 'ANALYTICAL ENGINES',
+            'oracle_account_party_id': '100000055846517',
+        })
+
+        self.assertEqual(existing['match_basis'], 'account_selected_contact_email')
+        self.assertEqual(existing['contact_party_number'], '15001')
+
+    def test_account_list_follows_every_oracle_page(self):
+        first = MagicMock(status_code=200, text='')
+        first.json.return_value = {
+            'items': [{'PartyId': 1, 'PartyNumber': 'A1', 'OrganizationName': 'ACME'}],
+            'hasMore': True,
+        }
+        second = MagicMock(status_code=200, text='')
+        second.json.return_value = {
+            'items': [{'PartyId': 2, 'PartyNumber': 'B2', 'OrganizationName': 'BETA'}],
+            'hasMore': False,
+        }
+        session = MagicMock()
+        session.get.side_effect = [first, second]
+        client = oracle_api.OracleLeadApiClient(
+            {'base_url': 'https://fake.oracle.example', 'api_timeout_seconds': 10},
+            username='u', password='p', session=session,
+        )
+
+        accounts = client.list_accounts(page_size=1)
+
+        self.assertEqual([account['PartyId'] for account in accounts], [1, 2])
+        self.assertEqual(session.get.call_args_list[0].kwargs['params']['offset'], '0')
+        self.assertEqual(session.get.call_args_list[1].kwargs['params']['offset'], '1')
+
+    def test_every_account_is_returned_with_the_closest_first(self):
+        accounts = [
+            {'PartyId': 3, 'OrganizationName': 'ZETA FLUID SYSTEMS'},
+            {'PartyId': 1, 'OrganizationName': 'ACME CORPORATION'},
+            {'PartyId': 2, 'OrganizationName': 'ACME AEROSPACE'},
+        ]
+
+        ranked = oracle_api.rank_company_accounts('Acme Corp', accounts)
+
+        self.assertEqual([item['PartyId'] for item in ranked], [1, 2, 3])
+        self.assertEqual(len(ranked), len(accounts))
+        self.assertEqual(ranked[0]['similarity'], 1.0)
+
+    def test_same_named_but_distinct_oracle_accounts_are_not_collapsed(self):
+        accounts = [
+            {'PartyId': 1, 'OrganizationName': 'ACME'},
+            {'PartyId': 2, 'OrganizationName': 'ACME'},
+            {'PartyId': 1, 'OrganizationName': 'ACME'},
+        ]
+
+        ranked = oracle_api.rank_company_accounts('Acme', accounts)
+
+        self.assertEqual([item['PartyId'] for item in ranked], [1, 2])
+
     def test_happy_path_returns_success_dict(self):
         client = _mock_client(status_code=201, json_body={'LeadId': 99, 'LeadNumber': 'LN-0042'})
         result = client.submit_lead(self._lead(), 'Website/Email', source_label='Inquiry')

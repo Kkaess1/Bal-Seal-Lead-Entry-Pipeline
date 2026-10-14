@@ -100,6 +100,28 @@
                         <option value="{{ tm }}"{% if lead.assigned_tm == tm %} selected{% endif %}>{{ tm }}</option>
                       {% endfor %}
                     </select>
+                  {% elif field == 'organization' %}
+                    <input type="text" name="organization" value="{{ lead.organization or '' }}"
+                           class="company-name-input" autocomplete="organization">
+                    <select name="oracle_account_party_id" class="oracle-company-select"
+                            data-url="{{ url_for('oracle_companies', lead_id=lead.id) }}"
+                            aria-label="Match this lead to an existing OSC company">
+                      <option value="">Loading companies from OSC...</option>
+                      {% if lead.oracle_account_party_id %}
+                        <option value="{{ lead.oracle_account_party_id }}"
+                                data-name="{{ lead.oracle_account_name }}"
+                                data-number="{{ lead.oracle_account_party_number or '' }}" selected>
+                          {{ lead.oracle_account_name }}{% if lead.oracle_account_party_number %} (#{{ lead.oracle_account_party_number }}){% endif %} - selected OSC company
+                        </option>
+                      {% endif %}
+                    </select>
+                    <input type="hidden" name="oracle_account_name"
+                           value="{{ lead.oracle_account_name or '' }}">
+                    <input type="hidden" name="oracle_account_party_number"
+                           value="{{ lead.oracle_account_party_number or '' }}">
+                    <small class="oracle-company-status" role="status">
+                      OSC matches are ranked by similarity. Choose an existing company whenever it is the same organization.
+                    </small>
                   {% else %}
                     <input type="{{ 'email' if field == 'email' else 'url' if field == 'website' else 'text' }}" name="{{ field }}" value="{{ lead[field] or '' }}">
                   {% endif %}

@@ -2,7 +2,10 @@
 {% block title %}Pending Review{% endblock %}
 {% block content %}
   <div class="page-head">
-    <h2>Pending Review ({{ leads|length }})</h2>
+    {# data-live-count spans are decremented in place by removeLeadCards() as
+       cards are decided, so the totals stay right without a reload. The
+       heading counts both folders; the folder tab counts only its own. #}
+    <h2 id="pending-review-heading">Pending Review (<span data-live-count>{{ pending_total }}</span>)</h2>
     <div class="actions" style="margin-top: 0;">
     {# A lead that never arrived as an email -- a call, a card, a forward.
        Beside the ingest button because both answer "get a lead in front of
@@ -56,6 +59,42 @@
     </div>
   </div>
 
+  {# Two folders of one page, not two pages: a Spam lead is still awaiting
+     review (see spam_folder.py), so it stays under Pending Review. #}
+  <nav class="review-folders" aria-label="Pending Review folders">
+    <a href="{{ url_for('index') }}"
+       class="{{ 'active' if folder == 'inbox' }}"
+       {% if folder == 'inbox' %}aria-current="page"{% endif %}>
+      Inbox <span class="nav-count" {% if folder == 'inbox' %}data-live-count{% endif %}>{{ inbox_count }}</span>
+    </a>
+    <a href="{{ url_for('index', folder='spam') }}"
+       class="{{ 'active' if folder == 'spam' }}"
+       {% if folder == 'spam' %}aria-current="page"{% endif %}
+       title="Leads from @gmail.com addresses">
+      Spam <span class="nav-count" {% if folder == 'spam' %}data-live-count{% endif %}>{{ spam_count }}</span>
+    </a>
+  </nav>
+
+  {% if folder == 'spam' and leads %}
+    <div class="spam-bar" data-hide-when-empty>
+      <p>Leads whose email or contact address is <strong>@gmail.com</strong>. Approve any
+        that are real; <strong>Disqualify all</strong> rejects the rest and deletes their
+        emails from the Sales inbox.</p>
+      {% if delete_enabled %}
+        <button type="button" class="btn-reject" id="open-disqualify-dialog">Disqualify all</button>
+      {% else %}
+        <p class="meta">Disqualify all is unavailable: deleting email is switched off in
+          config.json (<code>outlook.allow_email_delete</code>).</p>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% for message in get_flashed_messages(category_filter=['spam_success']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}); });</script>
+  {% endfor %}
+  {% for message in get_flashed_messages(category_filter=['spam_error']) %}
+    <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}, 'error'); });</script>
+  {% endfor %}
   {% for message in get_flashed_messages(category_filter=['ingest_success']) %}
     <script>window.addEventListener('DOMContentLoaded', function() { showToast({{ message|tojson }}); });</script>
   {% endfor %}
@@ -183,12 +222,24 @@
     })();
   </script>
 
-  {% if not leads %}
+  {% macro empty_state() %}
     <div class="empty-container">
-      <h3>No leads waiting for review</h3>
-      <a href="{{ url_for('queue') }}" class="btn btn-approve">Review All Leads &rarr;</a>
+      {% if folder == 'spam' %}
+        <h3>No Gmail leads in Spam</h3>
+        <a href="{{ url_for('index') }}" class="btn btn-approve">Back to Inbox &rarr;</a>
+      {% else %}
+        <h3>No leads waiting for review</h3>
+        {% if spam_count %}
+          <a href="{{ url_for('index', folder='spam') }}" class="btn btn-secondary">Check Spam ({{ spam_count }})</a>
+        {% endif %}
+        <a href="{{ url_for('queue') }}" class="btn btn-approve">Review All Leads &rarr;</a>
+      {% endif %}
     </div>
-  {% endif %}
+  {% endmacro %}
+  {# The same markup removeLeadCards() clones when the last card on the page
+     is decided, so a folder that drains in place looks like one loaded empty. #}
+  <template id="pending-empty-state">{{ empty_state() }}</template>
+  {% if not leads %}{{ empty_state() }}{% endif %}
 
   {# --i drives the staggered card entrance, capped at 12 so a long queue does
      not spend several seconds dealing itself out one card at a time. #}
@@ -546,6 +597,74 @@
         });
         dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
         dialog.querySelector('.delete-cancel').addEventListener('click', closeDialog);
+        dialog.addEventListener('click', function(event) {
+          if (event.target === dialog && backdropMousedown) closeDialog();
+          backdropMousedown = false;
+        });
+      })();
+    </script>
+  {% endif %}
+
+  {% if folder == 'spam' and leads and delete_enabled %}
+    <dialog class="forward-dialog" id="disqualify-dialog">
+      <form method="post" id="disqualify-form" action="{{ url_for('disqualify_spam') }}">
+        <div class="forward-dialog-head">
+          <h3>Disqualify all</h3>
+          <button type="button" class="forward-dialog-close" aria-label="Close">&times;</button>
+        </div>
+        <p class="meta">Rejects <strong id="disqualify-count">{{ leads|length }} lead{{ 's' if leads|length != 1 }}</strong> in Spam
+          and moves their emails to Deleted Items in Outlook.</p>
+        <p class="delete-dialog-warning">Approve any lead you want to keep before continuing.</p>
+        {# The cards on screen, rebuilt when the dialog opens: a lead that came
+           in after the page loaded has not been looked at, so it is not sent. #}
+        <div id="disqualify-ids"></div>
+        <p class="dialog-error" role="alert" hidden></p>
+        <div class="actions forward-dialog-actions">
+          <button type="button" class="btn btn-secondary disqualify-cancel">Cancel</button>
+          <button type="submit" class="btn-reject">Disqualify and delete emails</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script>
+      (function() {
+        var dialog = document.getElementById('disqualify-dialog');
+        var form = document.getElementById('disqualify-form');
+        var opener = document.getElementById('open-disqualify-dialog');
+        var idBox = document.getElementById('disqualify-ids');
+        var countLabel = document.getElementById('disqualify-count');
+        if (!dialog || !form || !opener) return;
+
+        opener.addEventListener('click', function() {
+          idBox.textContent = '';
+          var cards = document.querySelectorAll('.card[data-lead-id]');
+          cards.forEach(function(card) {
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'lead_id';
+            input.value = card.dataset.leadId;
+            idBox.appendChild(input);
+          });
+          countLabel.textContent = cards.length + (cards.length === 1 ? ' lead' : ' leads');
+          dialog.showModal();
+        });
+
+        form.addEventListener('submit', function(event) {
+          event.preventDefault();
+          var submitButton = form.querySelector('button[type=submit]');
+          submitButton.textContent = 'Disqualifying…';
+          submitEmailAction(form, dialog).finally(function() {
+            submitButton.textContent = 'Disqualify and delete emails';
+          });
+        });
+
+        var closeDialog = function() { dialog.close(); };
+        var backdropMousedown = false;
+        dialog.addEventListener('mousedown', function(event) {
+          backdropMousedown = (event.target === dialog);
+        });
+        dialog.querySelector('.forward-dialog-close').addEventListener('click', closeDialog);
+        dialog.querySelector('.disqualify-cancel').addEventListener('click', closeDialog);
         dialog.addEventListener('click', function(event) {
           if (event.target === dialog && backdropMousedown) closeDialog();
           backdropMousedown = false;
